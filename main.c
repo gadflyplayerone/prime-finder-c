@@ -106,6 +106,118 @@ static int cmp_seedstat(const void *A, const void *B)
     return 0;
 }
 
+/* ---------- Minimal PPM heatmap writer (no extra deps) ---------- */
+/* We generate a PPM (P6) image called "heatmap.ppm" representing
+   prime hits over seed pairs. X-axis: seed2, Y-axis: seed1.       */
+
+static void palette_fire(double t, unsigned char *r, unsigned char *g, unsigned char *b)
+/* t in [0,1]; maps black→red→orange→yellow→white */
+{
+    if (t < 0)
+        t = 0;
+    if (t > 1)
+        t = 1;
+    double x = t;
+    double R, G, B;
+    if (x < 0.25)
+    { /* black -> red */
+        R = 4.0 * x;
+        G = 0.0;
+        B = 0.0;
+    }
+    else if (x < 0.50)
+    { /* red -> orange */
+        R = 1.0;
+        G = 4.0 * (x - 0.25);
+        B = 0.0;
+    }
+    else if (x < 0.75)
+    { /* orange -> yellow */
+        R = 1.0;
+        G = 1.0;
+        B = 0.0;
+    }
+    else
+    { /* yellow -> white */
+        R = 1.0;
+        G = 1.0;
+        B = 4.0 * (x - 0.75);
+        if (B > 1.0)
+            B = 1.0;
+    }
+    *r = (unsigned char)(255.0 * R);
+    *g = (unsigned char)(255.0 * G);
+    *b = (unsigned char)(255.0 * B);
+}
+
+static void write_heatmap_ppm(const SeedStat *grid_stats,
+                              int seed_min, int seed_max,
+                              const char *path)
+{
+    int W = (seed_max - seed_min + 1); /* columns = s2 range */
+    int H = (seed_max - seed_min + 1); /* rows    = s1 range */
+
+    /* Find min/max hits for normalization */
+    int min_hits = grid_stats[0].hits, max_hits = grid_stats[0].hits;
+    for (int i = 0; i < W * H; ++i)
+    {
+        if (grid_stats[i].hits < min_hits)
+            min_hits = grid_stats[i].hits;
+        if (grid_stats[i].hits > max_hits)
+            max_hits = grid_stats[i].hits;
+    }
+    double span = (double)(max_hits - min_hits);
+    if (span <= 0)
+        span = 1.0; /* avoid div by zero */
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+    {
+        fprintf(stderr, "[HEATMAP] Failed to open %s for writing\n", path);
+        return;
+    }
+
+    /* P6 header */
+    fprintf(fp, "P6\n%d %d\n255\n", W, H);
+
+    /* The stats array is filled in row-major order over s1 then s2 in the loops below.
+       We'll replicate the same order to paint the image: row = s1, col = s2. */
+    for (int row = 0; row < H; ++row)
+    {
+        for (int col = 0; col < W; ++col)
+        {
+            int idx = row * W + col;
+            double t = ((double)grid_stats[idx].hits - (double)min_hits) / span;
+            unsigned char r, g, b;
+            palette_fire(t, &r, &g, &b);
+            unsigned char px[3] = {r, g, b};
+            fwrite(px, 1, 3, fp);
+        }
+    }
+    fclose(fp);
+
+    /* Also dump a CSV matrix for the hits to "heatmap.csv" for convenience */
+    FILE *csv = fopen("heatmap.csv", "w");
+    if (csv)
+    {
+        fprintf(csv, "# rows = seed1 [%d..%d], cols = seed2 [%d..%d], values = prime hits in first 'window' terms\n",
+                seed_min, seed_max, seed_min, seed_max);
+        for (int row = 0; row < H; ++row)
+        {
+            for (int col = 0; col < W; ++col)
+            {
+                int idx = row * W + col;
+                fprintf(csv, "%d%s", grid_stats[idx].hits, (col == W - 1) ? "" : ",");
+            }
+            fprintf(csv, "\n");
+        }
+        fclose(csv);
+    }
+
+    printf("[HEATMAP] Wrote %s (P6) and heatmap.csv | min_hits=%d max_hits=%d\n",
+           path, min_hits, max_hits);
+}
+
 /* ---------- Main ---------- */
 
 int main(int argc, char **argv)
@@ -142,6 +254,7 @@ int main(int argc, char **argv)
     /* Stage 1: Seed scan (unchanged) */
     int total = (seed_max - seed_min + 1) * (seed_max - seed_min + 1);
     SeedStat *stats = (SeedStat *)malloc(sizeof(SeedStat) * total);
+    SeedStat *stats_grid = (SeedStat *)malloc(sizeof(SeedStat) * total); /* preserve pre-sort order for heatmap */
     int idx = 0;
 
     clock_t t0 = clock();
@@ -154,11 +267,17 @@ int main(int argc, char **argv)
             stats[idx].s2 = s2;
             stats[idx].hits = hits;
             stats[idx].density = (double)hits / (double)(window > 0 ? window : 1);
+
+            /* mirror into grid copy before sort for heatmap generation */
+            stats_grid[idx] = stats[idx];
             idx++;
         }
     }
     double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("[STATS] scanned %d seed pairs in %.2fs\n", total, elapsed);
+
+    /* Generate heatmap image + CSV before sorting (to retain spatial layout) */
+    write_heatmap_ppm(stats_grid, seed_min, seed_max, "heatmap.ppm");
 
     qsort(stats, total, sizeof(SeedStat), cmp_seedstat);
 
@@ -172,7 +291,7 @@ int main(int argc, char **argv)
     }
     fclose(batch);
 
-    /* ---- NEW: choose seed pair with MAX hits; randomize among ties ---- */
+    /* ---- choose seed pair with MAX hits; randomize among ties ---- */
     srand((unsigned)time(NULL));
     int max_hits = stats[0].hits; /* after sort, stats[0] has the maximum hits */
     int tie_count = 0;
@@ -319,6 +438,7 @@ int main(int argc, char **argv)
 
     mpz_clear(a);
     mpz_clear(b);
+    free(stats_grid);
     free(stats);
     return 0;
 }
