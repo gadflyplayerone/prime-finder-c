@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-O3 -march=native -Wall
+#CFLAGS=-O3 -march=native -Wall
 CFLAGS=-O3 -march=native -mtune=native -fno-plt #x86
 #CFLAGS=-O3 -mcpu=native #graviton arm64
 LDFLAGS= -lgmp
