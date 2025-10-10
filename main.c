@@ -2,22 +2,19 @@
  * Prime Finder via Fibonacci-Like Operator (C + GMP)
  *
  * Build: see Makefile
- *  - Enable OpenMP to parallelize heatmap/diagnostics:
+ *  - Enable OpenMP to parallelize heatmap/diagnostics and batched prime checks:
  *      CFLAGS += -fopenmp -flto
  *      LDFLAGS += -fopenmp -flto -lm -lgmp
  *  - Run with: OMP_NUM_THREADS=<n> ./prime_finder ...
  *
  * Notes:
- *  - Stage 1 (seed scan) remains functionally identical, but we add
- *    early-abandon during window counting to drop seeds that cannot
- *    keep up with the current best (threshold=0.80).
- *  - Heatmaps and diagnostics are computed; their generation is
- *    parallelized with OpenMP for speed, but printed program output
- *    is unchanged (aside from the extra diagnostic lines and the
- *    presence of the additional heatmap files).
- *  - Stage 2 (focused search) is inherently sequential for a given
- *    seed; for full CPU utilization, run multiple processes with
- *    disjoint seed regions or different tie-breaking RNG seeds.
+ *  - Stage 1: same behavior, with early-abandon in window counting.
+ *  - Heatmaps/diagnostics parallelized (OpenMP).
+ *  - Stage 2: NEW batched + parallel primality testing. The FLO sequence
+ *    is still generated sequentially, but candidate terms are collected
+ *    into small chunks and tested concurrently across cores. Output
+ *    (messages, stats) remains the same in spirit; progress still streams
+ *    to stderr with rolling ETA based on observed per-check timing.
  */
 
 #include <gmp.h>
@@ -245,7 +242,7 @@ static void write_heatmap_ppm(const SeedStat *grid_stats,
 
     fprintf(fp, "P6\n%d %d\n255\n", W, H);
 
-    /* Write each row in order; parallelize within row to keep deterministic file layout */
+    /* Write rows in order; parallelize within row to keep deterministic file layout */
     for (int row = 0; row < H; ++row)
     {
         unsigned char *rowbuf = (unsigned char *)malloc(3 * W);
@@ -265,7 +262,7 @@ static void write_heatmap_ppm(const SeedStat *grid_stats,
     }
     fclose(fp);
 
-    /* CSV (sequential; minor cost) */
+    /* CSV */
     FILE *csv = fopen("heatmap.csv", "w");
     if (csv)
     {
@@ -309,7 +306,6 @@ static void write_gcd_heatmap_ppm(int seed_min, int seed_max, const char *path)
         for (int col = 0; col < W; ++col)
         {
             int s2 = seed_min + col;
-            /* gcd(s1,s2) */
             int a = s1, b = s2;
             while (b)
             {
@@ -321,7 +317,7 @@ static void write_gcd_heatmap_ppm(int seed_min, int seed_max, const char *path)
 
             double t = 0.0;
             if (g > 1 && max_val > 0.0)
-                t = log2((double)g) / max_val; /* [0,1] */
+                t = log2((double)g) / max_val;
             unsigned char r, gc, bc;
             palette_fire(t, &r, &gc, &bc);
 
@@ -360,19 +356,14 @@ static void write_exclusions_heatmap_ppm(int seed_min, int seed_max, int window,
         {
             int s2 = seed_min + col;
 
-            /* thread-local mpz */
             mpz_t a, b;
             mpz_init_set_ui(a, (unsigned long)s1);
             mpz_init_set_ui(b, (unsigned long)s2);
-
             int excl = 0, terms = 0;
 
-            /* term 0 */
             terms++;
             if ((s1 > 10) && (s1 % 2 == 0 || s1 % 5 == 0))
                 excl++;
-
-            /* term 1 */
             terms++;
             if ((s2 > 10) && (s2 % 2 == 0 || s2 % 5 == 0))
                 excl++;
@@ -388,10 +379,9 @@ static void write_exclusions_heatmap_ppm(int seed_min, int seed_max, int window,
             mpz_clear(a);
             mpz_clear(b);
 
-            double frac = (terms > 0) ? ((double)excl / (double)terms) : 0.0; /* 0..1 */
+            double frac = (terms > 0) ? ((double)excl / (double)terms) : 0.0;
             unsigned char r, g, bc;
             palette_fire(frac, &r, &g, &bc);
-
             rowbuf[3 * col + 0] = r;
             rowbuf[3 * col + 1] = g;
             rowbuf[3 * col + 2] = bc;
@@ -401,6 +391,88 @@ static void write_exclusions_heatmap_ppm(int seed_min, int seed_max, int window,
     }
     fclose(fp);
     printf("[HEATMAP] Wrote %s (quick-exclusion fraction)\n", path);
+}
+
+/* ---------- Stage 2 parallel check support ---------- */
+
+typedef struct
+{
+    mpz_t n;
+    int term_index; /* term counter within the post-threshold loop */
+} Candidate;
+
+#ifndef PAR_CHUNK_SIZE
+#define PAR_CHUNK_SIZE 64 /* number of candidate terms per parallel chunk */
+#endif
+
+/* Fill up to PAR_CHUNK_SIZE candidates by advancing (a,b) terms.
+   Skips mod-2,5. Returns number of candidates filled, and advances t (term counter). */
+static int build_candidate_chunk(Candidate *cand, mpz_t a, mpz_t b, int *t, int max_terms)
+{
+    int m = 0;
+    while (m < PAR_CHUNK_SIZE && *t < max_terms)
+    {
+        /* current term is in b; quick exclusions */
+        if (!(mpz_divisible_ui_p(b, 2) || mpz_divisible_ui_p(b, 5)))
+        {
+            mpz_init_set(cand[m].n, b);
+            cand[m].term_index = *t;
+            m++;
+        }
+        /* advance to next term */
+        flo_next(a, b);
+        (*t)++;
+    }
+    return m;
+}
+
+/* Clear a candidate chunk */
+static void clear_candidate_chunk(Candidate *cand, int m)
+{
+    for (int i = 0; i < m; ++i)
+    {
+        mpz_clear(cand[i].n);
+    }
+}
+
+/* Parallel primality test over a chunk. Returns:
+   - found_idx >=0 : index within chunk of first prime found (notionally earliest term)
+   - else -1       : none prime in this chunk.
+   We ensure "earliest term" semantics by resolving ties after parallel section. */
+static int parallel_test_chunk(Candidate *cand, int m, int reps)
+{
+    if (m <= 0)
+        return -1;
+
+    /* Record flags per index; 0=not prime, 1=probable prime */
+    int *is_prime = (int *)calloc(m, sizeof(int));
+
+/* Parallel primality checks (thread-local mpz) */
+#pragma omp parallel for schedule(static) if (m > 1)
+    for (int i = 0; i < m; ++i)
+    {
+        /* mpz_probab_prime_p is pure on the mpz arg; we can use it directly */
+        int pr = mpz_probab_prime_p(cand[i].n, reps);
+        is_prime[i] = (pr > 0) ? 1 : 0;
+    }
+
+    /* Find the smallest term_index that is prime (earliest in sequence) */
+    int found_idx = -1;
+    int best_term = 0x7fffffff;
+    for (int i = 0; i < m; ++i)
+    {
+        if (is_prime[i])
+        {
+            if (cand[i].term_index < best_term)
+            {
+                best_term = cand[i].term_index;
+                found_idx = i;
+            }
+        }
+    }
+
+    free(is_prime);
+    return found_idx;
 }
 
 /* ---------- Main ---------- */
@@ -439,7 +511,7 @@ int main(int argc, char **argv)
 #pragma omp master
         omp_threads = omp_get_num_threads();
     }
-    fprintf(stderr, "[OMP] Using up to %d threads for heatmap/diagnostics (Stage 1 I/O remains ordered)\n", omp_threads);
+    fprintf(stderr, "[OMP] Using up to %d threads for heatmap/diagnostics and parallel prime checks\n", omp_threads);
 #endif
 
     printf("== FLO Prime Finder (C + GMP) ==\n");
@@ -482,12 +554,11 @@ int main(int argc, char **argv)
     printf("[STATS] scanned %d seed pairs in %.2fs | early-abandoned=%d (threshold=%.2f of best)\n",
            total, elapsed, abandoned_count, keepup_threshold);
 
-    /* Generate regular + illuminated heatmaps from the grid snapshot */
+    /* Heatmaps/diagnostics */
     write_heatmap_ppm(stats_grid, seed_min, seed_max, "heatmap.ppm");
     write_gcd_heatmap_ppm(seed_min, seed_max, "heatmap_gcd.ppm");
     write_exclusions_heatmap_ppm(seed_min, seed_max, window, "heatmap_exclusions.ppm");
 
-    /* Additional diagnostics */
     int gcd_gt1 = 0, diagonal = 0;
     for (int i = 0; i < total; ++i)
     {
@@ -507,7 +578,7 @@ int main(int argc, char **argv)
     }
     printf("[DIAG] gcd(s1,s2)>1 seeds: %d/%d | diagonal seeds: %d\n", gcd_gt1, total, diagonal);
 
-    /* Leaderboard (unchanged) */
+    /* Leaderboard */
     qsort(stats, total, sizeof(SeedStat), cmp_seedstat);
 
     FILE *batch = fopen(batch_path, "w");
@@ -541,7 +612,7 @@ int main(int argc, char **argv)
     printf("[SELECT] Using seed with max prime hits (ties randomized): (%d,%d) hits=%d (tie-group=%d)\n",
            stats[0].s1, stats[0].s2, stats[0].hits, tie_count);
 
-    /* Stage 2: Focused search (unchanged output aside from timing/ETA already present) */
+    /* Stage 2: Focused search with PARALLEL primality testing */
     FILE *out = fopen(out_path, "w");
     fprintf(out, "# Focused FLO prime search\n# target_digits=%d max_terms=%d\n", target_digits, max_terms);
 
@@ -587,43 +658,50 @@ int main(int argc, char **argv)
         long long checks = 0;
         int found_for_seed = 0;
 
-        for (int t = 0; t < max_terms; ++t)
+        /* NEW: batched + parallel prime checking */
+        int t = 0; /* term counter post-threshold */
+        while (t < max_terms)
         {
-            clock_t _chk_t0 = clock();
-
-            /* Quick filters do NOT count as checks */
-            if (mpz_divisible_ui_p(b, 2) || mpz_divisible_ui_p(b, 5))
-            {
-                flo_next(a, b);
+            Candidate cand[PAR_CHUNK_SIZE];
+            int m = build_candidate_chunk(cand, a, b, &t, max_terms);
+            if (m <= 0)
                 continue;
-            }
 
-            /* Count this as a primality check */
-            checks++;
-            int pr = mpz_probab_prime_p(b, 25);
+            clock_t chunk_t0 = clock();
+            int found_idx = parallel_test_chunk(cand, m, /*reps=*/25);
+            clock_t chunk_t1 = clock();
 
-            /* per-check timing + ETA */
-            clock_t _chk_t1 = clock();
-            double _chk_sec = (double)(_chk_t1 - _chk_t0) / CLOCKS_PER_SEC;
-            double _elapsed = (double)(_chk_t1 - t_start) / CLOCKS_PER_SEC;
-            double _avg_chk = (checks > 0) ? (_elapsed / (double)checks) : _chk_sec;
-            double _remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
-            double _eta_sec = _remain * _avg_chk;
+            /* Update checks (exact): if found, only count up to the winning candidate */
+            if (found_idx >= 0)
+                checks += (found_idx + 1);
+            else
+                checks += m;
+
+            /* Derive per-check timing + ETA from chunk stats */
+            double chunk_secs = (double)(chunk_t1 - chunk_t0) / CLOCKS_PER_SEC;
+            double elapsed_secs = (double)(chunk_t1 - t_start) / CLOCKS_PER_SEC;
+            double avg_chk = (checks > 0) ? (elapsed_secs / (double)checks) : (m > 0 ? chunk_secs / (double)m : 0.0);
+            double remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
+            double eta_sec = remain * avg_chk;
 
             fprintf(stderr,
-                    "\rcheck #%lld | last=%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs   ",
-                    checks, _chk_sec, _avg_chk, _remain, _eta_sec);
+                    "\rcheck #%lld | last≈%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs   ",
+                    checks,
+                    (m > 0 ? (chunk_secs / (double)m) : 0.0),
+                    avg_chk,
+                    remain,
+                    eta_sec);
 
-            if (pr > 0)
+            if (found_idx >= 0)
             {
-                /* Stop timer on first hit */
+                /* stop timer on first hit */
                 clock_t t_end = clock();
                 double secs = (double)(t_end - t_start) / CLOCKS_PER_SEC;
 
-                char *prime_str = mpz_get_str(NULL, 10, b);
+                /* print prime */
+                char *prime_str = mpz_get_str(NULL, 10, cand[found_idx].n);
                 int dcount = (int)strlen(prime_str);
 
-                /* Report stats vs expected + print prime */
                 double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
 
                 printf("FOUND probable prime | seed=(%d,%d) digits=%d\n", s1, s2, dcount);
@@ -638,13 +716,14 @@ int main(int argc, char **argv)
                 fflush(out);
 
                 free(prime_str);
+                clear_candidate_chunk(cand, m);
                 total_found++;
                 found_for_seed = 1;
-                break; /* stop on first prime for this seed */
+                break;
             }
 
-            /* advance sequence */
-            flo_next(a, b);
+            /* no prime in this chunk; clear and continue */
+            clear_candidate_chunk(cand, m);
         }
 
         if (!found_for_seed)
@@ -662,8 +741,7 @@ int main(int argc, char **argv)
     free(stats_grid);
     free(stats);
 
-    /* restore top in case caller expects it afterward (no functional effect here) */
-    (void)old_top;
+    (void)old_top; /* preserve prior variable, no-op */
 
     return 0;
 }
