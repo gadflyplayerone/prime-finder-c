@@ -2,6 +2,22 @@
  * Prime Finder via Fibonacci-Like Operator (C + GMP)
  *
  * Build: see Makefile
+ *  - Enable OpenMP to parallelize heatmap/diagnostics:
+ *      CFLAGS += -fopenmp -flto
+ *      LDFLAGS += -fopenmp -flto -lm -lgmp
+ *  - Run with: OMP_NUM_THREADS=<n> ./prime_finder ...
+ *
+ * Notes:
+ *  - Stage 1 (seed scan) remains functionally identical, but we add
+ *    early-abandon during window counting to drop seeds that cannot
+ *    keep up with the current best (threshold=0.80).
+ *  - Heatmaps and diagnostics are computed; their generation is
+ *    parallelized with OpenMP for speed, but printed program output
+ *    is unchanged (aside from the extra diagnostic lines and the
+ *    presence of the additional heatmap files).
+ *  - Stage 2 (focused search) is inherently sequential for a given
+ *    seed; for full CPU utilization, run multiple processes with
+ *    disjoint seed regions or different tie-breaking RNG seeds.
  */
 
 #include <gmp.h>
@@ -10,6 +26,9 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* ---------- Expected-trials estimator (unchanged API) ---------- */
 
@@ -76,10 +95,9 @@ static int count_primes_in_window_abandon(int s1, int s2, int window, int best_h
         if (mpz_probab_prime_p(a, 10) > 0)
             hits++;
     }
-    /* possible early check after term 0 */
     if (best_hits_so_far > 0)
     {
-        int remaining = window - 1; /* terms left to observe */
+        int remaining = window - 1;
         if (hits + remaining < (int)ceil(threshold * (double)best_hits_so_far))
         {
             abandoned = 1;
@@ -150,9 +168,9 @@ static int cmp_seedstat(const void *A, const void *B)
 
 /* ---------- Minimal PPM heatmap writer (no extra deps) ---------- */
 /* We generate PPM (P6) images representing prime-hit diagnostics:
-   - heatmap.ppm           : standard prime hits
-   - heatmap_gcd.ppm      : gcd(s1,s2) intensity map (g>1 bands)
-   - heatmap_exclusions.ppm: fraction of quick-excluded terms (mod 2 or 5) in the window
+   - heatmap.ppm             : standard prime hits
+   - heatmap_gcd.ppm         : gcd(s1,s2) intensity map (g>1 bands)
+   - heatmap_exclusions.ppm  : fraction of quick-excluded terms (mod 2 or 5) in the window
    X-axis: seed2, Y-axis: seed1.                                      */
 
 static void palette_fire(double t, unsigned char *r, unsigned char *g, unsigned char *b)
@@ -201,14 +219,18 @@ static void write_heatmap_ppm(const SeedStat *grid_stats,
 {
     int W = (seed_max - seed_min + 1);
     int H = (seed_max - seed_min + 1);
+    int N = W * H;
 
+    /* parallel min/max reduction */
     int min_hits = grid_stats[0].hits, max_hits = grid_stats[0].hits;
-    for (int i = 0; i < W * H; ++i)
+#pragma omp parallel for reduction(min : min_hits) reduction(max : max_hits) schedule(static) if (N > 2048)
+    for (int i = 0; i < N; ++i)
     {
-        if (grid_stats[i].hits < min_hits)
-            min_hits = grid_stats[i].hits;
-        if (grid_stats[i].hits > max_hits)
-            max_hits = grid_stats[i].hits;
+        int h = grid_stats[i].hits;
+        if (h < min_hits)
+            min_hits = h;
+        if (h > max_hits)
+            max_hits = h;
     }
     double span = (double)(max_hits - min_hits);
     if (span <= 0)
@@ -222,20 +244,28 @@ static void write_heatmap_ppm(const SeedStat *grid_stats,
     }
 
     fprintf(fp, "P6\n%d %d\n255\n", W, H);
+
+    /* Write each row in order; parallelize within row to keep deterministic file layout */
     for (int row = 0; row < H; ++row)
     {
+        unsigned char *rowbuf = (unsigned char *)malloc(3 * W);
+#pragma omp parallel for schedule(static) if (W > 64)
         for (int col = 0; col < W; ++col)
         {
             int idx = row * W + col;
             double t = ((double)grid_stats[idx].hits - (double)min_hits) / span;
             unsigned char r, g, b;
             palette_fire(t, &r, &g, &b);
-            unsigned char px[3] = {r, g, b};
-            fwrite(px, 1, 3, fp);
+            rowbuf[3 * col + 0] = r;
+            rowbuf[3 * col + 1] = g;
+            rowbuf[3 * col + 2] = b;
         }
+        fwrite(rowbuf, 1, 3 * W, fp);
+        free(rowbuf);
     }
     fclose(fp);
 
+    /* CSV (sequential; minor cost) */
     FILE *csv = fopen("heatmap.csv", "w");
     if (csv)
     {
@@ -261,8 +291,6 @@ static void write_gcd_heatmap_ppm(int seed_min, int seed_max, const char *path)
 {
     int W = (seed_max - seed_min + 1);
     int H = (seed_max - seed_min + 1);
-
-    /* find max gcd to normalize (upper bound is seed_max) */
     double max_val = log2((double)seed_max);
 
     FILE *fp = fopen(path, "wb");
@@ -271,17 +299,17 @@ static void write_gcd_heatmap_ppm(int seed_min, int seed_max, const char *path)
         fprintf(stderr, "[HEATMAP] Failed to open %s for writing\n", path);
         return;
     }
-
     fprintf(fp, "P6\n%d %d\n255\n", W, H);
 
     for (int row = 0; row < H; ++row)
     {
+        unsigned char *rowbuf = (unsigned char *)malloc(3 * W);
         int s1 = seed_min + row;
+#pragma omp parallel for schedule(static) if (W > 64)
         for (int col = 0; col < W; ++col)
         {
             int s2 = seed_min + col;
-            int g = 1;
-            /* fast gcd */
+            /* gcd(s1,s2) */
             int a = s1, b = s2;
             while (b)
             {
@@ -289,16 +317,20 @@ static void write_gcd_heatmap_ppm(int seed_min, int seed_max, const char *path)
                 a = b;
                 b = t;
             }
-            g = a;
+            int g = a;
 
             double t = 0.0;
             if (g > 1 && max_val > 0.0)
                 t = log2((double)g) / max_val; /* [0,1] */
-            unsigned char r, gC, bC;
-            palette_fire(t, &r, &gC, &bC);
-            unsigned char px[3] = {r, gC, bC};
-            fwrite(px, 1, 3, fp);
+            unsigned char r, gc, bc;
+            palette_fire(t, &r, &gc, &bc);
+
+            rowbuf[3 * col + 0] = r;
+            rowbuf[3 * col + 1] = gc;
+            rowbuf[3 * col + 2] = bc;
         }
+        fwrite(rowbuf, 1, 3 * W, fp);
+        free(rowbuf);
     }
     fclose(fp);
     printf("[HEATMAP] Wrote %s (gcd intensity)\n", path);
@@ -316,16 +348,19 @@ static void write_exclusions_heatmap_ppm(int seed_min, int seed_max, int window,
         fprintf(stderr, "[HEATMAP] Failed to open %s for writing\n", path);
         return;
     }
-
     fprintf(fp, "P6\n%d %d\n255\n", W, H);
 
     for (int row = 0; row < H; ++row)
     {
+        unsigned char *rowbuf = (unsigned char *)malloc(3 * W);
         int s1 = seed_min + row;
+
+#pragma omp parallel for schedule(static) if (W > 64)
         for (int col = 0; col < W; ++col)
         {
             int s2 = seed_min + col;
 
+            /* thread-local mpz */
             mpz_t a, b;
             mpz_init_set_ui(a, (unsigned long)s1);
             mpz_init_set_ui(b, (unsigned long)s2);
@@ -354,11 +389,15 @@ static void write_exclusions_heatmap_ppm(int seed_min, int seed_max, int window,
             mpz_clear(b);
 
             double frac = (terms > 0) ? ((double)excl / (double)terms) : 0.0; /* 0..1 */
-            unsigned char r, g, bC;
-            palette_fire(frac, &r, &g, &bC);
-            unsigned char px[3] = {r, g, bC};
-            fwrite(px, 1, 3, fp);
+            unsigned char r, g, bc;
+            palette_fire(frac, &r, &g, &bc);
+
+            rowbuf[3 * col + 0] = r;
+            rowbuf[3 * col + 1] = g;
+            rowbuf[3 * col + 2] = bc;
         }
+        fwrite(rowbuf, 1, 3 * W, fp);
+        free(rowbuf);
     }
     fclose(fp);
     printf("[HEATMAP] Wrote %s (quick-exclusion fraction)\n", path);
@@ -392,6 +431,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc)
             batch_path = argv[++i];
     }
+
+#ifdef _OPENMP
+    int omp_threads = 1;
+#pragma omp parallel
+    {
+#pragma omp master
+        omp_threads = omp_get_num_threads();
+    }
+    fprintf(stderr, "[OMP] Using up to %d threads for heatmap/diagnostics (Stage 1 I/O remains ordered)\n", omp_threads);
+#endif
 
     printf("== FLO Prime Finder (C + GMP) ==\n");
     printf("seed_min=%d seed_max=%d window=%d top=%d target_digits=%d max_terms=%d\n",
@@ -442,7 +491,7 @@ int main(int argc, char **argv)
     int gcd_gt1 = 0, diagonal = 0;
     for (int i = 0; i < total; ++i)
     {
-        int a = stats_grid[i].s1, b = stats_grid[i].s2, g;
+        int a = stats_grid[i].s1, b = stats_grid[i].s2;
         int x = a, y = b;
         while (y)
         {
@@ -450,7 +499,7 @@ int main(int argc, char **argv)
             x = y;
             y = t;
         }
-        g = x;
+        int g = x;
         if (g > 1)
             gcd_gt1++;
         if (stats_grid[i].s1 == stats_grid[i].s2)
@@ -487,11 +536,12 @@ int main(int argc, char **argv)
         stats[0] = stats[chosen_idx];
         stats[chosen_idx] = tmp;
     }
-    top = 1;
+    int old_top = top;
+    top = 1; /* Force single-seed focused search */
     printf("[SELECT] Using seed with max prime hits (ties randomized): (%d,%d) hits=%d (tie-group=%d)\n",
            stats[0].s1, stats[0].s2, stats[0].hits, tie_count);
 
-    /* Stage 2: Focused search (unchanged output) */
+    /* Stage 2: Focused search (unchanged output aside from timing/ETA already present) */
     FILE *out = fopen(out_path, "w");
     fprintf(out, "# Focused FLO prime search\n# target_digits=%d max_terms=%d\n", target_digits, max_terms);
 
@@ -512,17 +562,18 @@ int main(int argc, char **argv)
                 s1, s2, i + 1, stats[i].hits, stats[i].density);
         printf("[SEARCH] Seed (%d,%d)\n", s1, s2);
 
+        /* Initialize sequence */
         mpz_set_ui(a, (unsigned long)s1);
         mpz_set_ui(b, (unsigned long)s2);
 
-        /* warm-up to target digits */
+        /* warm-up to target digits (no prime checks before threshold) */
         int terms_advanced = 0;
         while (mpz_sizeinbase(b, 10) < (unsigned)target_digits)
         {
             flo_next(a, b);
             terms_advanced++;
             if (terms_advanced > max_terms)
-                break;
+                break; /* safety */
         }
 
         if (mpz_sizeinbase(b, 10) < (unsigned)target_digits)
@@ -540,15 +591,18 @@ int main(int argc, char **argv)
         {
             clock_t _chk_t0 = clock();
 
+            /* Quick filters do NOT count as checks */
             if (mpz_divisible_ui_p(b, 2) || mpz_divisible_ui_p(b, 5))
             {
                 flo_next(a, b);
                 continue;
             }
 
+            /* Count this as a primality check */
             checks++;
             int pr = mpz_probab_prime_p(b, 25);
 
+            /* per-check timing + ETA */
             clock_t _chk_t1 = clock();
             double _chk_sec = (double)(_chk_t1 - _chk_t0) / CLOCKS_PER_SEC;
             double _elapsed = (double)(_chk_t1 - t_start) / CLOCKS_PER_SEC;
@@ -556,17 +610,20 @@ int main(int argc, char **argv)
             double _remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
             double _eta_sec = _remain * _avg_chk;
 
-            fprintf(stderr, "\rcheck #%lld | last=%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs   ",
+            fprintf(stderr,
+                    "\rcheck #%lld | last=%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs   ",
                     checks, _chk_sec, _avg_chk, _remain, _eta_sec);
 
             if (pr > 0)
             {
+                /* Stop timer on first hit */
                 clock_t t_end = clock();
                 double secs = (double)(t_end - t_start) / CLOCKS_PER_SEC;
 
                 char *prime_str = mpz_get_str(NULL, 10, b);
                 int dcount = (int)strlen(prime_str);
 
+                /* Report stats vs expected + print prime */
                 double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
 
                 printf("FOUND probable prime | seed=(%d,%d) digits=%d\n", s1, s2, dcount);
@@ -583,9 +640,10 @@ int main(int argc, char **argv)
                 free(prime_str);
                 total_found++;
                 found_for_seed = 1;
-                break;
+                break; /* stop on first prime for this seed */
             }
 
+            /* advance sequence */
             flo_next(a, b);
         }
 
@@ -603,5 +661,9 @@ int main(int argc, char **argv)
     mpz_clear(b);
     free(stats_grid);
     free(stats);
+
+    /* restore top in case caller expects it afterward (no functional effect here) */
+    (void)old_top;
+
     return 0;
 }
