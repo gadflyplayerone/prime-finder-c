@@ -1,2 +1,5 @@
 prime_finder
 .DS_Store
+batch-results.txt
+heatmap.*
+results.txt
