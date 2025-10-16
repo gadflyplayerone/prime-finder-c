@@ -364,7 +364,10 @@ make prime_finder_noomp        # macOS clang (no OpenMP)
 make prime_finder_omp8         # 8-core build
 make prime_finder_omp32        # 32-core build
 make prime_finder_omp64        # 64-core build
+make prime_finder_omp192       # 192-core build (larger OpenMP chunking)
 ```
+
+OpenMP targets set their default thread count at compile time (e.g., the 192-core build calls `omp_set_num_threads(192)` on startup); you can still override this at runtime with `OMP_NUM_THREADS` if needed.
 
 ### 6.3 Run Example
 
@@ -375,6 +378,8 @@ make prime_finder_omp64        # 64-core build
 At startup the program now auto-selects a seed range: it draws `seed_min` uniformly from `[1000, 100000]`, sets `seed_max = seed_min + 200`, and runs with a fixed `window = 1000`. The chosen range is echoed as `[RANDOM] seed_min=… seed_max=… window=1000` in the console/PM2 logs for visibility.
 
 Seed scan results are cached in `cache/seed_cache_<min>_<max>_w1000.csv`; subsequent runs that pick the same range reuse this data immediately. The leaderboard always reports the top 10 seeds, and Stage 2 now runs without a max-terms cap. During Stage 2 the live ETA printed to stderr is scaled by the active OpenMP thread count (e.g., `/8`, `/16`, etc.), reflecting the parallel chunk testing speedup.
+
+Candidate generation now skips numbers divisible by primes up to 59 before invoking Miller–Rabin, and every probable-prime check is memoized in `cache/mr_cache_v1.csv`. Replays of a sequence reuse cached MR outcomes instead of recomputing huge modular exponentiations, especially helpful for the 64-thread PM2 targets.
 
 ### 6.4 Output Files
 

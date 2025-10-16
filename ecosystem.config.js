@@ -49,7 +49,7 @@ module.exports = {
       env: {
         OMP_NUM_THREADS: "64",
       },
-      args: "--target-digits 100000",
+      args: "--target-digits 30000 --flo_predict 1",
       out_file: "./logs/prime-finder-omp64.log",
       error_file: "./logs/prime-finder-omp64.error.log",
       merge_logs: true,

@@ -25,6 +25,7 @@
 #include <time.h>
 #include <math.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -33,6 +34,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #endif
 #ifdef _OPENMP
 #include <omp.h>
@@ -89,6 +91,32 @@ static void configure_streams_for_pm2(int argc, char **argv)
     fprintf(stderr, "\n");
 }
 
+static double wall_time_now(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int freq_initialized = 0;
+    LARGE_INTEGER counter;
+    if (!freq_initialized)
+    {
+        QueryPerformanceFrequency(&freq);
+        freq_initialized = 1;
+    }
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
+#ifdef CLOCK_MONOTONIC
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec * 1e-6;
+#endif
+#endif
+}
+
 typedef struct
 {
     int s1, s2;
@@ -110,6 +138,145 @@ static void ensure_cache_dir(void)
         fprintf(stderr, "[CACHE] Failed to create cache/ directory: %s\n", strerror(errno));
     }
 #endif
+}
+
+static const unsigned int SMALL_PRIMES[] = {3, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59};
+static const size_t SMALL_PRIME_COUNT = sizeof(SMALL_PRIMES) / sizeof(SMALL_PRIMES[0]);
+
+static int passes_small_prime_filters(const mpz_t n)
+{
+    if (mpz_sgn(n) <= 0)
+        return 0;
+    if (mpz_even_p(n))
+        return 0;
+    if (mpz_tdiv_ui(n, 5) == 0)
+        return 0;
+    for (size_t i = 0; i < SMALL_PRIME_COUNT; ++i)
+    {
+        if (mpz_tdiv_ui(n, SMALL_PRIMES[i]) == 0)
+            return 0;
+    }
+    return 1;
+}
+
+#define MR_CACHE_BUCKETS 4096
+
+typedef struct MRCacheEntry
+{
+    uint64_t h1;
+    uint64_t h2;
+    unsigned char result;
+    struct MRCacheEntry *next;
+} MRCacheEntry;
+
+static MRCacheEntry *mr_cache_table[MR_CACHE_BUCKETS];
+static int mr_cache_loaded = 0;
+static FILE *mr_cache_append_fp = NULL;
+static const char *MR_CACHE_PATH = "cache/mr_cache_v1.csv";
+
+static unsigned int mr_cache_bucket_index(uint64_t h1, uint64_t h2)
+{
+    return (unsigned int)((h1 ^ (h2 << 1)) & (MR_CACHE_BUCKETS - 1));
+}
+
+static void mr_cache_add_entry(uint64_t h1, uint64_t h2, unsigned char result)
+{
+    unsigned int idx = mr_cache_bucket_index(h1, h2);
+    MRCacheEntry *entry = (MRCacheEntry *)malloc(sizeof(MRCacheEntry));
+    if (!entry)
+        return;
+    entry->h1 = h1;
+    entry->h2 = h2;
+    entry->result = result;
+    entry->next = mr_cache_table[idx];
+    mr_cache_table[idx] = entry;
+}
+
+static int mr_cache_lookup(uint64_t h1, uint64_t h2, int *result_out)
+{
+    unsigned int idx = mr_cache_bucket_index(h1, h2);
+    for (MRCacheEntry *cur = mr_cache_table[idx]; cur != NULL; cur = cur->next)
+    {
+        if (cur->h1 == h1 && cur->h2 == h2)
+        {
+            if (result_out)
+                *result_out = cur->result ? 1 : 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void mr_cache_store(uint64_t h1, uint64_t h2, unsigned char result)
+{
+    if (mr_cache_lookup(h1, h2, NULL))
+        return;
+    mr_cache_add_entry(h1, h2, result);
+    if (mr_cache_append_fp)
+    {
+        fprintf(mr_cache_append_fp, "%" PRIu64 ",%" PRIu64 ",%u\n", h1, h2, (unsigned int)result);
+        fflush(mr_cache_append_fp);
+    }
+}
+
+static void compute_mpz_hash(const mpz_t n, uint64_t *h1, uint64_t *h2)
+{
+    const unsigned long long MOD1 = 18446744073709551557ULL;
+    const unsigned long long MOD2 = 18446744073709551533ULL;
+    *h1 = (uint64_t)mpz_tdiv_ui(n, MOD1);
+    *h2 = (uint64_t)mpz_tdiv_ui(n, MOD2);
+}
+
+static void mr_cache_shutdown(void)
+{
+    if (mr_cache_append_fp)
+    {
+        fclose(mr_cache_append_fp);
+        mr_cache_append_fp = NULL;
+    }
+    for (int i = 0; i < MR_CACHE_BUCKETS; ++i)
+    {
+        MRCacheEntry *cur = mr_cache_table[i];
+        while (cur)
+        {
+            MRCacheEntry *next = cur->next;
+            free(cur);
+            cur = next;
+        }
+        mr_cache_table[i] = NULL;
+    }
+    mr_cache_loaded = 0;
+}
+
+static void mr_cache_init(void)
+{
+    if (mr_cache_loaded)
+        return;
+
+    ensure_cache_dir();
+    mr_cache_init();
+    mr_cache_init();
+
+    FILE *fp = fopen(MR_CACHE_PATH, "r");
+    if (fp)
+    {
+        uint64_t h1 = 0, h2 = 0;
+        unsigned int result = 0;
+        while (fscanf(fp, "%" SCNu64 ",%" SCNu64 ",%u\n", &h1, &h2, &result) == 3)
+        {
+            mr_cache_add_entry(h1, h2, (unsigned char)(result ? 1 : 0));
+        }
+        fclose(fp);
+    }
+
+    mr_cache_append_fp = fopen(MR_CACHE_PATH, "a");
+    if (!mr_cache_append_fp)
+    {
+        fprintf(stderr, "[CACHE] Failed to open %s for appending: %s\n", MR_CACHE_PATH, strerror(errno));
+    }
+
+    atexit(mr_cache_shutdown);
+    mr_cache_loaded = 1;
 }
 
 static int load_seed_cache(const char *path, int seed_min, int seed_max, int window, int total, SeedStat *stats, SeedStat *stats_grid)
@@ -501,18 +668,21 @@ typedef struct
 } Candidate;
 
 #ifndef PAR_CHUNK_SIZE
-#define PAR_CHUNK_SIZE 64 /* number of candidate terms per parallel chunk */
+#define PAR_CHUNK_SIZE 128 /* number of candidate terms per parallel chunk */
 #endif
 
+#define MR_REPS 10
+
 /* Fill up to PAR_CHUNK_SIZE candidates by advancing (a,b) terms.
-   Skips mod-2,5. Returns number of candidates filled, and advances t (term counter). */
+   Applies small-prime filters before enqueueing. Returns number of
+   candidates filled, and advances t (term counter). */
 static int build_candidate_chunk(Candidate *cand, mpz_t a, mpz_t b, int *t, int max_terms)
 {
     int m = 0;
     while (m < PAR_CHUNK_SIZE && (max_terms < 0 || *t < max_terms))
     {
         /* current term is in b; quick exclusions */
-        if (!(mpz_divisible_ui_p(b, 2) || mpz_divisible_ui_p(b, 5)))
+        if (passes_small_prime_filters(b))
         {
             mpz_init_set(cand[m].n, b);
             cand[m].term_index = *t;
@@ -538,21 +708,61 @@ static void clear_candidate_chunk(Candidate *cand, int m)
    - found_idx >=0 : index within chunk of first prime found (notionally earliest term)
    - else -1       : none prime in this chunk.
    We ensure "earliest term" semantics by resolving ties after parallel section. */
-static int parallel_test_chunk(Candidate *cand, int m, int reps)
+static int parallel_test_chunk(Candidate *cand, int m)
 {
     if (m <= 0)
         return -1;
 
-    /* Record flags per index; 0=not prime, 1=probable prime */
     int *is_prime = (int *)calloc(m, sizeof(int));
+    if (!is_prime)
+        return -1;
+
+    int *needs_eval = (int *)calloc(m, sizeof(int));
+    uint64_t *hash1 = (uint64_t *)malloc(sizeof(uint64_t) * m);
+    uint64_t *hash2 = (uint64_t *)malloc(sizeof(uint64_t) * m);
+
+    int use_cache = (needs_eval && hash1 && hash2);
+
+    if (use_cache)
+    {
+        for (int i = 0; i < m; ++i)
+        {
+            compute_mpz_hash(cand[i].n, &hash1[i], &hash2[i]);
+            int cached = 0;
+            if (mr_cache_lookup(hash1[i], hash2[i], &cached))
+            {
+                is_prime[i] = cached ? 1 : 0;
+                needs_eval[i] = 0;
+            }
+            else
+            {
+                needs_eval[i] = 1;
+            }
+        }
 
 /* Parallel primality checks (thread-local mpz) */
 #pragma omp parallel for schedule(static) if (m > 1)
-    for (int i = 0; i < m; ++i)
+        for (int i = 0; i < m; ++i)
+        {
+            if (!needs_eval[i])
+                continue;
+            int pr = mpz_probab_prime_p(cand[i].n, MR_REPS);
+            is_prime[i] = (pr > 0) ? 1 : 0;
+        }
+
+        for (int i = 0; i < m; ++i)
+        {
+            if (needs_eval[i])
+                mr_cache_store(hash1[i], hash2[i], (unsigned char)(is_prime[i] ? 1 : 0));
+        }
+    }
+    else
     {
-        /* mpz_probab_prime_p is pure on the mpz arg; we can use it directly */
-        int pr = mpz_probab_prime_p(cand[i].n, reps);
-        is_prime[i] = (pr > 0) ? 1 : 0;
+        for (int i = 0; i < m; ++i)
+        {
+            int pr = mpz_probab_prime_p(cand[i].n, MR_REPS);
+            is_prime[i] = (pr > 0) ? 1 : 0;
+        }
     }
 
     /* Find the smallest term_index that is prime (earliest in sequence) */
@@ -570,6 +780,12 @@ static int parallel_test_chunk(Candidate *cand, int m, int reps)
         }
     }
 
+    if (needs_eval)
+        free(needs_eval);
+    if (hash1)
+        free(hash1);
+    if (hash2)
+        free(hash2);
     free(is_prime);
     return found_idx;
 }
@@ -580,10 +796,12 @@ int main(int argc, char **argv)
 {
     configure_streams_for_pm2(argc, argv);
 
+    double program_t0 = wall_time_now();
+
     /* CLI-compatible defaults (unchanged) */
     int seed_min = 0, seed_max = 0;
     const int window = 1000;
-    int top = 10, max_terms = -1, target_digits = 3800;
+    int top = 10, max_terms = -1, target_digits = 10000;
     const char *out_path = "results.txt";
     const char *batch_path = "batch-results.txt";
     int flo_predict_flag = 0;
@@ -604,12 +822,15 @@ int main(int argc, char **argv)
     entropy ^= (unsigned int)current_pid();
     entropy ^= (unsigned int)(uintptr_t)&entropy;
     srand(entropy);
-    const int seed_span = 10000 - 1;
-    seed_min = 1 + (rand() % seed_span);
-    seed_max = seed_min + 250;
+    const int seed_span = 100000 - 1000 + 1;
+    seed_min = 1000 + (rand() % seed_span);
+    seed_max = seed_min + 200;
 
     int omp_threads = 1;
 #ifdef _OPENMP
+#ifdef DEFAULT_OMP_THREADS
+    omp_set_num_threads(DEFAULT_OMP_THREADS);
+#endif
 #pragma omp parallel
     {
 #pragma omp master
@@ -637,10 +858,14 @@ int main(int argc, char **argv)
     SeedStat *stats_grid = (SeedStat *)malloc(sizeof(SeedStat) * total); /* preserve pre-sort order for heatmap */
 
     ensure_cache_dir();
+    mr_cache_init();
     char cache_path[256];
     snprintf(cache_path, sizeof(cache_path), "cache/seed_cache_%d_%d_w%d.csv", seed_min, seed_max, window);
 
+    double seed_scan_seconds = 0.0;
+    double cache_load_start = wall_time_now();
     int cache_hit = load_seed_cache(cache_path, seed_min, seed_max, window, total, stats, stats_grid);
+    double cache_load_elapsed = wall_time_now() - cache_load_start;
     if (!cache_hit)
     {
         const double keepup_threshold = 0.80; /* abandon if cannot reach 80% of current best */
@@ -649,7 +874,7 @@ int main(int argc, char **argv)
         int idx = 0;
         double next_progress = 0.10;
 
-        clock_t t0 = clock();
+        double scan_t0 = wall_time_now();
         printf("[STATS] scanning seeds: 0%% complete\n");
         for (int s1 = seed_min; s1 <= seed_max; ++s1)
         {
@@ -670,7 +895,7 @@ int main(int argc, char **argv)
                 while (progress >= next_progress && next_progress < 1.001)
                 {
                     int pct = (int)(next_progress * 100.0 + 0.5);
-                    printf("[STATS] target: %d | scanning seeds: %d%% complete\n", target_digits, pct);
+                    printf("[STATS] scanning seeds: %d%% complete\n", pct);
                     next_progress += 0.10;
                 }
 
@@ -682,14 +907,16 @@ int main(int argc, char **argv)
         }
         if (next_progress <= 1.001)
             printf("[STATS] scanning seeds: 100%% complete\n");
-        double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
+        seed_scan_seconds = wall_time_now() - scan_t0;
         printf("[STATS] scanned %d seed pairs in %.2fs | early-abandoned=%d (threshold=%.2f of best)\n",
-               total, elapsed, abandoned_count, keepup_threshold);
+               total, seed_scan_seconds, abandoned_count, keepup_threshold);
         write_seed_cache(cache_path, seed_min, seed_max, window, total, stats_grid);
     }
     else
     {
-        printf("[CACHE] Using cached seed stats from %s (total=%d)\n", cache_path, total);
+        seed_scan_seconds = cache_load_elapsed;
+        printf("[CACHE] Using cached seed stats from %s (total=%d) | load=%.3fs\n",
+               cache_path, total, seed_scan_seconds);
     }
 
     /* Heatmaps/diagnostics */
@@ -754,15 +981,19 @@ int main(int argc, char **argv)
     FILE *out = fopen(out_path, "w");
     fprintf(out, "# Focused FLO prime search\n# target_digits=%d max_terms=%s\n", target_digits, max_terms_label);
 
+    printf("[TIMING] seed_scan_elapsed=%.3fs\n", seed_scan_seconds);
+    fprintf(out, "# seed_scan_elapsed=%.3fs\n", seed_scan_seconds);
+
     double expected_checks = expected_prime_trials(target_digits, /*odd_only=*/1, /*corrections=*/0);
     printf("Estimated primality tests per prime @ %d digits (odd-only): %.1f\n", target_digits, expected_checks);
     fprintf(out, "Estimated primality tests per prime @ %d digits (odd-only): %.1f\n", target_digits, expected_checks);
 
     mpz_t a, b;
-    mpz_init(a);
-    mpz_init(b);
+   mpz_init(a);
+   mpz_init(b);
 
-    int total_found = 0;
+   int total_found = 0;
+    double total_search_seconds = 0.0;
 
     for (int i = 0; i < (top < total ? top : total); ++i)
     {
@@ -770,6 +1001,9 @@ int main(int argc, char **argv)
         fprintf(out, "\n== Seed (%d,%d) rank=%d window_hits=%d density=%.3f\n",
                 s1, s2, i + 1, stats[i].hits, stats[i].density);
         printf("[SEARCH] Seed (%d,%d)\n", s1, s2);
+
+        double seed_search_start = wall_time_now();
+        double seed_search_elapsed = 0.0;
 
         /* Initialize sequence */
         mpz_set_ui(a, (unsigned long)s1);
@@ -789,10 +1023,14 @@ int main(int argc, char **argv)
         {
             printf("  Reached max warm-up terms without hitting %d digits. Skipping seed.\n", target_digits);
             fprintf(out, "  Reached max warm-up terms without hitting %d digits. Skipping.\n", target_digits);
+            seed_search_elapsed = wall_time_now() - seed_search_start;
+            total_search_seconds += seed_search_elapsed;
+            printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
+            fprintf(out, "# seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
             continue;
         }
 
-        clock_t t_start = clock();
+        double search_phase_start = wall_time_now();
         long long checks = 0;
         int found_for_seed = 0;
 
@@ -819,8 +1057,6 @@ int main(int argc, char **argv)
             }
 
             /* Current absolute index offset since warm-up: terms_advanced from earlier counts steps after seed (term1) */
-            long long checks = 0;
-            int found_for_seed = 0;
             int current_idx = 0; /* we don’t track absolute seed index; we’ll just advance further as needed */
 
             /* Probe through ranked indices by advancing sequentially */
@@ -832,8 +1068,17 @@ int main(int argc, char **argv)
                     flo_next(a,b);
                     current_idx++;
                     /* apply quick filters and test primality now (no chunking) */
-                    if (!(mpz_divisible_ui_p(b,2) || mpz_divisible_ui_p(b,5))) {
-                        int isp = mpz_probab_prime_p(b, 25) > 0;
+                    if (passes_small_prime_filters(b)) {
+                        uint64_t h1 = 0, h2 = 0;
+                        compute_mpz_hash(b, &h1, &h2);
+                        int cached = 0;
+                        int isp = 0;
+                        if (mr_cache_lookup(h1, h2, &cached)) {
+                            isp = cached;
+                        } else {
+                            isp = (mpz_probab_prime_p(b, MR_REPS) > 0);
+                            mr_cache_store(h1, h2, (unsigned char)(isp ? 1 : 0));
+                        }
                         checks++;
                         flo_bandit_update(&P, current_idx, isp);
                         if (isp) {
@@ -870,6 +1115,10 @@ int main(int argc, char **argv)
                 fprintf(out, "  [FLO_Predict] No prime found in guided window for seed=(%d,%d)\n", s1, s2);
             }
             flo_predictor_destroy(&P);
+            seed_search_elapsed = wall_time_now() - seed_search_start;
+            total_search_seconds += seed_search_elapsed;
+            printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
+            fprintf(out, "# seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
             continue; /* move to next seed */
         }
         /* === end FLO_Predict block === */
@@ -882,9 +1131,9 @@ int main(int argc, char **argv)
             if (m <= 0)
                 continue;
 
-            clock_t chunk_t0 = clock();
-            int found_idx = parallel_test_chunk(cand, m, /*reps=*/25);
-            clock_t chunk_t1 = clock();
+            double chunk_t0 = wall_time_now();
+            int found_idx = parallel_test_chunk(cand, m);
+            double chunk_t1 = wall_time_now();
 
             /* Update checks (exact): if found, only count up to the winning candidate */
             if (found_idx >= 0)
@@ -893,8 +1142,8 @@ int main(int argc, char **argv)
                 checks += m;
 
             /* Derive per-check timing + ETA from chunk stats */
-            double chunk_secs = (double)(chunk_t1 - chunk_t0) / CLOCKS_PER_SEC;
-            double elapsed_secs = (double)(chunk_t1 - t_start) / CLOCKS_PER_SEC;
+            double chunk_secs = chunk_t1 - chunk_t0;
+            double elapsed_secs = chunk_t1 - search_phase_start;
             double avg_chk = (checks > 0) ? (elapsed_secs / (double)checks) : (m > 0 ? chunk_secs / (double)m : 0.0);
             double remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
             double eta_sec = remain * avg_chk;
@@ -914,8 +1163,7 @@ int main(int argc, char **argv)
             if (found_idx >= 0)
             {
                 /* stop timer on first hit */
-                clock_t t_end = clock();
-                double secs = (double)(t_end - t_start) / CLOCKS_PER_SEC;
+                double secs = wall_time_now() - search_phase_start;
 
                 /* print prime */
                 char *prime_str = mpz_get_str(NULL, 10, cand[found_idx].n);
@@ -956,7 +1204,18 @@ int main(int argc, char **argv)
             printf("  No prime found within %d checks-window (post-threshold) for this seed.\n", max_terms);
             fprintf(out, "  No prime found within %d checks-window (post-threshold).\n", max_terms);
         }
+
+        seed_search_elapsed = wall_time_now() - seed_search_start;
+        total_search_seconds += seed_search_elapsed;
+        printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
+        fprintf(out, "# seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
     }
+
+    double program_elapsed = wall_time_now() - program_t0;
+    fprintf(out, "# timing_totals seed_scan=%.3fs prime_search=%.3fs overall=%.3fs\n",
+            seed_scan_seconds, total_search_seconds, program_elapsed);
+    printf("[TIMING] totals: seed_scan=%.3fs prime_search=%.3fs overall=%.3fs\n",
+           seed_scan_seconds, total_search_seconds, program_elapsed);
 
     fprintf(out, "\n# total_found=%d\n", total_found);
     fclose(out);

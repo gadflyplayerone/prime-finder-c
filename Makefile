@@ -50,5 +50,8 @@ prime_finder_omp32: $(SRC)
 prime_finder_omp64: $(SRC)
 	$(CC) $(CFLAGS_OMP) $(OMPFLAGS) -DDEFAULT_OMP_THREADS=64 -o $@ $(SRC) $(LIBS) $(OMPFLAGS)
 
+prime_finder_omp192: $(SRC)
+	$(CC) $(CFLAGS_OMP) $(OMPFLAGS) -DDEFAULT_OMP_THREADS=192 -DPAR_CHUNK_SIZE=256 -o $@ $(SRC) $(LIBS) $(OMPFLAGS)
+
 clean:
-	rm -f prime_finder prime_finder_noomp prime_finder_omp8 prime_finder_omp16 prime_finder_omp32 prime_finder_omp64
+	rm -f prime_finder prime_finder_noomp prime_finder_omp8 prime_finder_omp16 prime_finder_omp32 prime_finder_omp64 prime_finder_omp192
