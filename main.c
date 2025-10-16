@@ -1051,25 +1051,38 @@ int main(int argc, char **argv)
         /* warm-up to target digits (no prime checks before threshold) */
         int terms_advanced = 0;
         size_t digits = mpz_sizeinbase(b, 10);
-        const int warmup_log_interval = 1000;
+        int warmup_milestone = 1; /* report 10%,20%,...,90% */
+        size_t next_milestone_digits = 0;
+        if (target_digits > 0)
+            next_milestone_digits = (size_t)(((long long)target_digits * warmup_milestone + 9) / 10);
         while (digits < (unsigned)target_digits)
         {
             flo_next(a, b);
             terms_advanced++;
             digits = mpz_sizeinbase(b, 10);
 
-            if (terms_advanced % warmup_log_interval == 0)
+            if (target_digits > 0 && warmup_milestone <= 9 && digits >= next_milestone_digits)
             {
-                double pct = (target_digits > 0) ? (100.0 * (double)digits / (double)target_digits) : 0.0;
-                if (pct > 100.0)
-                    pct = 100.0;
-                printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.1f%% of target)\n",
+                double pct = warmup_milestone * 10.0;
+                printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.0f%% of target)\n",
                        s1, s2, terms_advanced, digits, pct);
                 fflush(stdout);
+                warmup_milestone++;
+                next_milestone_digits = (size_t)(((long long)target_digits * warmup_milestone + 9) / 10);
             }
 
             if (max_terms >= 0 && terms_advanced > max_terms)
                 break; /* safety */
+        }
+
+        if (target_digits > 0 && digits >= (unsigned)target_digits)
+        {
+            double pct = (100.0 * (double)digits) / (double)target_digits;
+            if (pct < 100.0)
+                pct = 100.0;
+            printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.1f%% of target)\n",
+                   s1, s2, terms_advanced, digits, pct);
+            fflush(stdout);
         }
 
         if (mpz_sizeinbase(b, 10) < (unsigned)target_digits)
@@ -1116,21 +1129,28 @@ int main(int argc, char **argv)
                 }
             }
 
-            /* Current absolute index offset since warm-up: terms_advanced from earlier counts steps after seed (term1) */
-            int current_idx = 0; /* we don’t track absolute seed index; we’ll just advance further as needed */
+            int base_idx = terms_advanced;
+            int current_offset = 0;
+            int last_tested_offset = -1;
 
             /* Probe through ranked indices by advancing sequentially */
             for (size_t k = 0; k < ranked_n && (max_terms < 0 || checks < max_terms); ++k)
             {
                 int target_i = ranked[k];
-                /* Advance until hitting target_i digits boundary already satisfied; we’re post warm-up, so simply advance difference */
-                while (current_idx < target_i && (max_terms < 0 || checks < max_terms))
+                int target_offset = target_i - base_idx;
+                if (target_offset < 0)
+                    target_offset = 0; /* already past this index */
+
+                while (current_offset < target_offset && (max_terms < 0 || checks < max_terms))
                 {
-                    /* generate next term */
                     flo_next(a, b);
-                    current_idx++;
-                    log_term_progress((long long)current_idx, b);
-                    /* apply quick filters and test primality now (no chunking) */
+                    current_offset++;
+                    log_term_progress((long long)(base_idx + current_offset), b);
+                    last_tested_offset = -1; /* new term, force test below */
+                }
+
+                if (last_tested_offset != current_offset && (max_terms < 0 || checks < max_terms))
+                {
                     if (passes_small_prime_filters(b))
                     {
                         uint64_t h1 = 0, h2 = 0;
@@ -1147,7 +1167,8 @@ int main(int argc, char **argv)
                             mr_cache_store(h1, h2, (unsigned char)(isp ? 1 : 0));
                         }
                         checks++;
-                        flo_bandit_update(&P, current_idx, isp);
+                        flo_bandit_update(&P, base_idx + current_offset, isp);
+                        last_tested_offset = current_offset;
                         if (isp)
                         {
                             char *prime_str = mpz_get_str(NULL, 10, b);
@@ -1160,9 +1181,9 @@ int main(int argc, char **argv)
                             double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
                             double eff_pct = (expected_checks_found > 0) ? 100.0 - (checks / expected_checks_found) : 0.0;
                             printf("FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
-                                   s1, s2, dcount, current_idx, checks);
+                                   s1, s2, dcount, base_idx + current_offset, checks);
                             fprintf(out, "FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
-                                    s1, s2, dcount, current_idx, checks);
+                                    s1, s2, dcount, base_idx + current_offset, checks);
                             printf("  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
                                    secs, checks, expected_checks, eff_ratio);
                             fprintf(out, "  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
@@ -1178,7 +1199,7 @@ int main(int argc, char **argv)
                             printf("  expected_checks_actual_digits(%d): %.1f | efficiency_pct 100.0 - (actual/expected): %.3f\n",
                                    dcount, expected_checks_found, eff_pct);
                             fprintf(out, "  expected_checks_actual_digits(%d): %.1f | efficiency_pct 100.0 - (actual/expected): %.3f\n",
-                                   dcount, expected_checks_found, eff_pct);
+                                    dcount, expected_checks_found, eff_pct);
                             printf("  prime: %s\n", prime_str);
                             fprintf(out, "prime: %s\n", prime_str);
                             free(prime_str);
@@ -1187,10 +1208,16 @@ int main(int argc, char **argv)
                             break;
                         }
                     }
+                    else
+                    {
+                        last_tested_offset = current_offset; /* filtered but counted as processed */
+                    }
                 }
                 if (found_for_seed)
                     break;
             }
+            free(ranked);
+
             if (!found_for_seed)
             {
                 printf("  [FLO_Predict] No prime found in guided window for seed=(%d,%d)\n", s1, s2);
