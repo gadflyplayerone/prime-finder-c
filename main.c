@@ -609,9 +609,9 @@ int main(int argc, char **argv)
     entropy ^= (unsigned int)current_pid();
     entropy ^= (unsigned int)(uintptr_t)&entropy;
     srand(entropy);
-    const int seed_span = 100000 - 1000 + 1;
-    seed_min = 1000 + (rand() % seed_span);
-    seed_max = seed_min + 200;
+    const int seed_span = 10000 - 1;
+    seed_min = 1 + (rand() % seed_span);
+    seed_max = seed_min + 250;
 
     int omp_threads = 1;
 #ifdef _OPENMP
