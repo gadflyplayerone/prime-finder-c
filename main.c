@@ -41,6 +41,9 @@
 #endif
 
 static const double LOG10_PHI = 0.20898764024997873;
+static int disable_quick_filters = 0;
+static int disable_mr_cache = 0;
+static int mr_reps = 10;
 
 #ifdef _WIN32
 static long current_pid(void) { return (long)GetCurrentProcessId(); }
@@ -147,6 +150,14 @@ static const size_t SMALL_PRIME_COUNT = sizeof(SMALL_PRIMES) / sizeof(SMALL_PRIM
 
 static int passes_small_prime_filters(const mpz_t n)
 {
+    if (disable_quick_filters)
+    {
+        if (mpz_sgn(n) <= 0)
+            return 0;
+        if (mpz_even_p(n))
+            return 0; /* keep obvious parity check */
+        return 1;
+    }
     if (mpz_sgn(n) <= 0)
         return 0;
     if (mpz_even_p(n))
@@ -169,6 +180,13 @@ static void log_term_progress(long long term_index, const mpz_t value)
         return;
     if (term_index <= 0 || (term_index % 1000) != 0)
         return;
+
+    size_t digits = mpz_sizeinbase(value, 10);
+    if (digits > 2000)
+    {
+        printf("[SEARCH] term=%lld digits=%zu\n", term_index, digits);
+        return;
+    }
 
     char *value_str = mpz_get_str(NULL, 10, value);
     if (!value_str)
@@ -232,6 +250,8 @@ static void mr_cache_add_entry(uint64_t h1, uint64_t h2, unsigned char result)
 
 static int mr_cache_lookup(uint64_t h1, uint64_t h2, int *result_out)
 {
+    if (disable_mr_cache)
+        return 0;
     unsigned int idx = mr_cache_bucket_index(h1, h2);
     for (MRCacheEntry *cur = mr_cache_table[idx]; cur != NULL; cur = cur->next)
     {
@@ -247,6 +267,8 @@ static int mr_cache_lookup(uint64_t h1, uint64_t h2, int *result_out)
 
 static void mr_cache_store(uint64_t h1, uint64_t h2, unsigned char result)
 {
+    if (disable_mr_cache)
+        return;
     if (mr_cache_lookup(h1, h2, NULL))
         return;
     mr_cache_add_entry(h1, h2, result);
@@ -288,6 +310,8 @@ static void mr_cache_shutdown(void)
 
 static void mr_cache_init(void)
 {
+    if (disable_mr_cache)
+        return;
     if (mr_cache_loaded)
         return;
 
@@ -798,8 +822,6 @@ typedef struct
 #define PAR_CHUNK_SIZE 128 /* number of candidate terms per parallel chunk */
 #endif
 
-#define MR_REPS 10
-
 /* Fill up to PAR_CHUNK_SIZE candidates by advancing (a,b) terms.
    Applies small-prime filters before enqueueing. Returns number of
    candidates filled, and advances t (term counter). */
@@ -846,10 +868,17 @@ static int parallel_test_chunk(Candidate *cand, int m)
         return -1;
 
     int *needs_eval = (int *)calloc(m, sizeof(int));
-    uint64_t *hash1 = (uint64_t *)malloc(sizeof(uint64_t) * m);
-    uint64_t *hash2 = (uint64_t *)malloc(sizeof(uint64_t) * m);
+    uint64_t *hash1 = NULL;
+    uint64_t *hash2 = NULL;
 
-    int use_cache = (needs_eval && hash1 && hash2);
+    int use_cache = (!disable_mr_cache);
+    if (use_cache)
+    {
+        hash1 = (uint64_t *)malloc(sizeof(uint64_t) * m);
+        hash2 = (uint64_t *)malloc(sizeof(uint64_t) * m);
+        if (!(needs_eval && hash1 && hash2))
+            use_cache = 0;
+    }
 
     if (use_cache)
     {
@@ -874,7 +903,7 @@ static int parallel_test_chunk(Candidate *cand, int m)
         {
             if (!needs_eval[i])
                 continue;
-            int pr = mpz_probab_prime_p(cand[i].n, MR_REPS);
+            int pr = mpz_probab_prime_p(cand[i].n, mr_reps);
             is_prime[i] = (pr > 0) ? 1 : 0;
         }
 
@@ -888,7 +917,7 @@ static int parallel_test_chunk(Candidate *cand, int m)
     {
         for (int i = 0; i < m; ++i)
         {
-            int pr = mpz_probab_prime_p(cand[i].n, MR_REPS);
+            int pr = mpz_probab_prime_p(cand[i].n, mr_reps);
             is_prime[i] = (pr > 0) ? 1 : 0;
         }
     }
@@ -944,6 +973,20 @@ int main(int argc, char **argv)
             batch_path = argv[++i];
         else if (!strcmp(argv[i], "--flo-predict"))
             flo_predict_flag = (i + 1 < argc && argv[i + 1][0] != '-') ? atoi(argv[++i]) : 1;
+        else if (!strcmp(argv[i], "--mr-reps") && i + 1 < argc)
+        {
+            mr_reps = atoi(argv[++i]);
+            if (mr_reps < 1)
+                mr_reps = 1;
+        }
+        else if (!strcmp(argv[i], "--no-quick-filters"))
+        {
+            disable_quick_filters = 1;
+        }
+        else if (!strcmp(argv[i], "--no-mr-cache"))
+        {
+            disable_mr_cache = 1;
+        }
     }
 
     unsigned int entropy = (unsigned int)time(NULL);
@@ -979,6 +1022,11 @@ int main(int argc, char **argv)
     printf("== FLO Prime Finder (C + GMP) ==\n");
     printf("seed_min=%d seed_max=%d window=%d top=%d target_digits=%d max_terms=%s\n",
            seed_min, seed_max, window, top, target_digits, max_terms_label);
+    printf("[CONFIG] Miller-Rabin reps=%d\n", mr_reps);
+    if (disable_quick_filters)
+        printf("[CONFIG] Quick candidate filters disabled (testing every odd term)\n");
+    if (disable_mr_cache)
+        printf("[CONFIG] MR result cache disabled\n");
     if (flo_predict_flag == 1)
     {
         printf("[FLO-PREDICT] Using default FLO prediction model\n");
@@ -990,7 +1038,8 @@ int main(int argc, char **argv)
     SeedStat *stats_grid = (SeedStat *)malloc(sizeof(SeedStat) * total); /* preserve pre-sort order for heatmap */
 
     ensure_cache_dir();
-    mr_cache_init();
+    if (!disable_mr_cache)
+        mr_cache_init();
     char cache_path[256];
     snprintf(cache_path, sizeof(cache_path), "cache/seed_cache_%d_%d_w%d.csv", seed_min, seed_max, window);
 
@@ -1257,18 +1306,22 @@ int main(int argc, char **argv)
                 {
                     if (passes_small_prime_filters(b))
                     {
-                        uint64_t h1 = 0, h2 = 0;
-                        compute_mpz_hash(b, &h1, &h2);
-                        int cached = 0;
                         int isp = 0;
-                        if (mr_cache_lookup(h1, h2, &cached))
+                        int cached = 0;
+                        uint64_t h1 = 0, h2 = 0;
+                        if (!disable_mr_cache)
                         {
-                            isp = cached;
+                            compute_mpz_hash(b, &h1, &h2);
+                            if (mr_cache_lookup(h1, h2, &cached))
+                            {
+                                isp = cached;
+                            }
                         }
-                        else
+                        if (!isp)
                         {
-                            isp = (mpz_probab_prime_p(b, MR_REPS) > 0);
-                            mr_cache_store(h1, h2, (unsigned char)(isp ? 1 : 0));
+                            isp = (mpz_probab_prime_p(b, mr_reps) > 0);
+                            if (!disable_mr_cache)
+                                mr_cache_store(h1, h2, (unsigned char)(isp ? 1 : 0));
                         }
                         checks++;
                         flo_bandit_update(&P, (int)(base_idx + current_offset), isp);
