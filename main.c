@@ -1050,6 +1050,8 @@ int main(int argc, char **argv)
         {
             flo_next(a, b);
             terms_advanced++;
+            if (terms_advanced % 250 == 0) 
+                log_term_progress((long long)terms_advanced, b);
             if (max_terms >= 0 && terms_advanced > max_terms)
                 break; /* safety */
         }
