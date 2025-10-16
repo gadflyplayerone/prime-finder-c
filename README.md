@@ -11,11 +11,11 @@ This document is designed for rapid onboarding: minimal math prerequisites, acti
 ### Linux (Debian/Ubuntu)
 ```bash
 # Toolchain + GMP
-sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libgmp-dev
+sudo apt update
+sudo apt install -y build-essential pkg-config libgmp-dev
 
 # (Optional) Clang + OpenMP (if you prefer clang over GCC)
-sudo apt-get install -y clang libomp-dev
+sudo apt install -y clang libomp-dev
 ```
 
 ### macOS (Homebrew)
@@ -54,6 +54,7 @@ make prime_finder_noomp
 
 # GCC + OpenMP builds (recommended for parallel diagnostics)
 make prime_finder_omp8
+make prime_finder_omp16
 make prime_finder_omp32
 make prime_finder_omp64
 
