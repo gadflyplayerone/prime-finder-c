@@ -56,7 +56,6 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss",
       autorestart: false,
     },
-    ,
     {
       name: "prime-finder-omp192",
       script: "./prime_finder_omp192",
