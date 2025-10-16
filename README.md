@@ -66,7 +66,9 @@ make prime_finder_omp32 CC=gcc-14
 **Run-time threading control**
 ```bash
 # Override thread count at run time (independent of the build target)
-export OMP_NUM_THREADS=8
+export OMP_STACKSIZE=512MB
+#ulimit -s unlimited
+export OMP_NUM_THREADS=192
 ./prime_finder ...
 ```
 

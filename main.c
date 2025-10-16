@@ -159,6 +159,42 @@ static int passes_small_prime_filters(const mpz_t n)
     return 1;
 }
 
+static int log_term_reporting_enabled = 0;
+
+static void log_term_progress(long long term_index, const mpz_t value)
+{
+    if (!log_term_reporting_enabled)
+        return;
+    if (term_index <= 0 || (term_index % 1000) != 0)
+        return;
+
+    char *value_str = mpz_get_str(NULL, 10, value);
+    if (!value_str)
+        return;
+
+    size_t len = strlen(value_str);
+    const size_t clip = 12;
+    char abbreviated[64];
+
+    if (len > clip * 2 + 4)
+    {
+        char head[clip + 1];
+        char tail[clip + 1];
+        memcpy(head, value_str, clip);
+        head[clip] = '\0';
+        memcpy(tail, value_str + (len - clip), clip);
+        tail[clip] = '\0';
+        snprintf(abbreviated, sizeof(abbreviated), "%s...%s", head, tail);
+    }
+    else
+    {
+        snprintf(abbreviated, sizeof(abbreviated), "%s", value_str);
+    }
+
+    printf("[SEARCH] term=%lld digits=%zu value=%s\n", term_index, len, abbreviated);
+    free(value_str);
+}
+
 #define MR_CACHE_BUCKETS 4096
 
 typedef struct MRCacheEntry
@@ -689,6 +725,7 @@ static int build_candidate_chunk(Candidate *cand, mpz_t a, mpz_t b, int *t, int 
         /* advance to next term */
         flo_next(a, b);
         (*t)++;
+        log_term_progress((long long)(*t), b);
     }
     return m;
 }
@@ -1028,6 +1065,7 @@ int main(int argc, char **argv)
             continue;
         }
 
+        log_term_reporting_enabled = 1;
         double search_phase_start = wall_time_now();
         long long checks = 0;
         int found_for_seed = 0;
@@ -1065,6 +1103,7 @@ int main(int argc, char **argv)
                     /* generate next term */
                     flo_next(a,b);
                     current_idx++;
+                    log_term_progress((long long)current_idx, b);
                     /* apply quick filters and test primality now (no chunking) */
                     if (passes_small_prime_filters(b)) {
                         uint64_t h1 = 0, h2 = 0;
@@ -1120,6 +1159,7 @@ int main(int argc, char **argv)
                 fprintf(out, "  [FLO_Predict] No prime found in guided window for seed=(%d,%d)\n", s1, s2);
             }
             flo_predictor_destroy(&P);
+            log_term_reporting_enabled = 0;
             seed_search_elapsed = wall_time_now() - seed_search_start;
             total_search_seconds += seed_search_elapsed;
             printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
@@ -1208,6 +1248,7 @@ int main(int argc, char **argv)
             fprintf(out, "  No prime found within %d checks-window (post-threshold).\n", max_terms);
         }
 
+        log_term_reporting_enabled = 0;
         seed_search_elapsed = wall_time_now() - seed_search_start;
         total_search_seconds += seed_search_elapsed;
         printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
