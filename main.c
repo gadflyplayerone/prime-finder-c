@@ -24,6 +24,13 @@
 #include "flo_predict.h"
 #include <time.h>
 #include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+static long current_pid(void) { return (long)GetCurrentProcessId(); }
+#else
+#include <unistd.h>
+static long current_pid(void) { return (long)getpid(); }
+#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -59,6 +66,19 @@ double expected_prime_trials(int digits, int odd_only, int use_asymptotic_correc
 }
 
 /* ---------- Types & helpers ---------- */
+
+static void configure_streams_for_pm2(int argc, char **argv)
+{
+    /* Ensure logs reach PM2 immediately even under non-tty buffering. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    fprintf(stderr, "[PM2] stdout=line-buffered stderr=unbuffered (pid=%ld)\n", current_pid());
+    fprintf(stderr, "[PM2] argv:");
+    for (int i = 0; i < argc; ++i)
+        fprintf(stderr, " %s", argv[i]);
+    fprintf(stderr, "\n");
+}
 
 typedef struct
 {
@@ -480,6 +500,8 @@ static int parallel_test_chunk(Candidate *cand, int m, int reps)
 
 int main(int argc, char **argv)
 {
+    configure_streams_for_pm2(argc, argv);
+
     /* CLI-compatible defaults (unchanged) */
     int seed_min = 1, seed_max = 50, window = 100, top = 25, max_terms = 200000, target_digits = 3800;
     const char *out_path = "results.txt";

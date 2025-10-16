@@ -395,7 +395,7 @@ pm2 monit                  # live CPU + per-core load + memory
 pm2 logs prime-finder-omp64 # stream stdout/stderr
 ```
 
-PM2 exposes the process console output plus CPU and per-core utilization for each configured binary. Stop or clear sessions with `pm2 stop <name>` / `pm2 delete <name>`.
+PM2 exposes the process console output plus CPU and per-core utilization for each configured binary. The binary now line-buffers stdout and immediately flushes stderr so log lines appear in PM2 without delay. Stop or clear sessions with `pm2 stop <name>` / `pm2 delete <name>`.
 
 ---
 
