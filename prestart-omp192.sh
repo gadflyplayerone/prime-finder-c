@@ -1,5 +1,5 @@
 #!/bin/bash
 
 export OMP_STACKSIZE=256M
-ulimit -s unlimited
+#lsulimit -s unlimited
 export OMP_NUM_THREADS=192
