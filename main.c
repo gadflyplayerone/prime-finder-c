@@ -373,13 +373,9 @@ static void write_seed_cache(const char *path, int seed_min, int seed_max, int w
 
 static void flo_next(mpz_t a, mpz_t b)
 {
-    // (a,b) -> (b, a+b)
-    mpz_t tmp;
-    mpz_init(tmp);
-    mpz_add(tmp, a, b);
-    mpz_set(a, b);
-    mpz_set(b, tmp);
-    mpz_clear(tmp);
+    /* (a,b) -> (b, a+b) without per-step init/clear churn */
+    mpz_add(a, a, b); /* a = a_old + b_old */
+    mpz_swap(a, b);   /* (a, b) = (b_old, a_old + b_old) */
 }
 
 /* count hits with early-abandon vs current best (threshold in [0,1]) */
@@ -1054,12 +1050,24 @@ int main(int argc, char **argv)
 
         /* warm-up to target digits (no prime checks before threshold) */
         int terms_advanced = 0;
-        while (mpz_sizeinbase(b, 10) < (unsigned)target_digits)
+        size_t digits = mpz_sizeinbase(b, 10);
+        const int warmup_log_interval = 1000;
+        while (digits < (unsigned)target_digits)
         {
             flo_next(a, b);
             terms_advanced++;
-            if (terms_advanced % 250 == 0)
-                log_term_progress((long long)terms_advanced, b);
+            digits = mpz_sizeinbase(b, 10);
+
+            if (terms_advanced % warmup_log_interval == 0)
+            {
+                double pct = (target_digits > 0) ? (100.0 * (double)digits / (double)target_digits) : 0.0;
+                if (pct > 100.0)
+                    pct = 100.0;
+                printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.1f%% of target)\n",
+                       s1, s2, terms_advanced, digits, pct);
+                fflush(stdout);
+            }
+
             if (max_terms >= 0 && terms_advanced > max_terms)
                 break; /* safety */
         }
@@ -1199,6 +1207,7 @@ int main(int argc, char **argv)
         /* === end FLO_Predict block === */
         /* NEW: batched + parallel prime checking */
         int t = 0; /* term counter post-threshold */
+        long long chunk_counter = 0;
         while (max_terms < 0 || t < max_terms)
         {
             Candidate cand[PAR_CHUNK_SIZE];
@@ -1206,6 +1215,7 @@ int main(int argc, char **argv)
             if (m <= 0)
                 continue;
 
+            chunk_counter++;
             double chunk_t0 = wall_time_now();
             int found_idx = parallel_test_chunk(cand, m);
             double chunk_t1 = wall_time_now();
@@ -1232,6 +1242,17 @@ int main(int argc, char **argv)
                     remain,
                     eta_parallel,
                     omp_threads);
+
+            if (chunk_counter % 16 == 0)
+            {
+                size_t digits_now = mpz_sizeinbase(b, 10);
+                double pct_digits = (target_digits > 0) ? (100.0 * (double)digits_now / (double)target_digits) : 0.0;
+                if (pct_digits > 100.0)
+                    pct_digits = 100.0;
+                printf("[SEARCH] seed=(%d,%d) chunks=%lld terms=%d checks=%lld digits≈%zu (%.1f%% target) ETA≈%.1fs\n",
+                       s1, s2, chunk_counter, t, checks, digits_now, pct_digits, eta_parallel);
+                fflush(stdout);
+            }
 
             if (found_idx >= 0)
             {
