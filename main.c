@@ -837,7 +837,6 @@ int main(int argc, char **argv)
                         checks++;
                         flo_bandit_update(&P, current_idx, isp);
                         if (isp) {
-                            double secs = (double)(clock()-t_start) / (double)CLOCKS_PER_SEC;
                             char *prime_str = mpz_get_str(NULL,10,b);
                             int dcount = (int)strlen(prime_str);
                             double expected_checks_target = expected_prime_trials(target_digits, /*odd_only=*/1, /*corrections=*/0);
