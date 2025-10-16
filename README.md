@@ -380,6 +380,23 @@ make prime_finder_omp64        # 64-core build
 | `heatmap.ppm` | Visualized prime-density lattice |
 | `heatmap_exclusions.ppm` | Filter-density visualization |
 
+### 6.5 PM2 Monitoring
+
+```bash
+# Build the OpenMP binaries you want to supervise
+make prime_finder_omp8 prime_finder_omp16 prime_finder_omp32 prime_finder_omp64
+
+# Ensure pm2 is available (npm install -g pm2) and create a log folder
+mkdir -p logs
+
+# Start and observe a run (example: 64-thread build)
+pm2 start ecosystem.config.js --only prime-finder-omp64
+pm2 monit                  # live CPU + per-core load + memory
+pm2 logs prime-finder-omp64 # stream stdout/stderr
+```
+
+PM2 exposes the process console output plus CPU and per-core utilization for each configured binary. Stop or clear sessions with `pm2 stop <name>` / `pm2 delete <name>`.
+
 ---
 
 ## 7. FLO_Predict Module

@@ -7,3 +7,4 @@ heatmap_exclusions.ppm
 heatmap_gcd.ppm
 run*.log
 stage*.log
+logs/
