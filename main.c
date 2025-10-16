@@ -800,8 +800,8 @@ int main(int argc, char **argv)
 
     /* CLI-compatible defaults (unchanged) */
     int seed_min = 0, seed_max = 0;
-    const int window = 1000;
-    int top = 10, max_terms = -1, target_digits = 10000;
+    const int window = 500;
+    int top = 10, max_terms = -1, target_digits = 100000;
     const char *out_path = "results.txt";
     const char *batch_path = "batch-results.txt";
     int flo_predict_flag = 0;
@@ -872,7 +872,7 @@ int main(int argc, char **argv)
         int best_hits_so_far = 0;
         int abandoned_count = 0;
         int idx = 0;
-        double next_progress = 0.10;
+        double next_progress = 0.05;
 
         double scan_t0 = wall_time_now();
         printf("[STATS] scanning seeds: 0%% complete\n");
@@ -896,7 +896,7 @@ int main(int argc, char **argv)
                 {
                     int pct = (int)(next_progress * 100.0 + 0.5);
                     printf("[STATS] scanning seeds: %d%% complete\n", pct);
-                    next_progress += 0.10;
+                    next_progress += 0.05;
                 }
 
                 if (abandoned_flag)
