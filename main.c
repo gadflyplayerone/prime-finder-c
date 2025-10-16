@@ -652,8 +652,10 @@ int main(int argc, char **argv)
         int best_hits_so_far = 0;
         int abandoned_count = 0;
         int idx = 0;
+        double next_progress = 0.10;
 
         clock_t t0 = clock();
+        printf("[STATS] scanning seeds: 0%% complete\n");
         for (int s1 = seed_min; s1 <= seed_max; ++s1)
         {
             for (int s2 = seed_min; s2 <= seed_max; ++s2)
@@ -669,12 +671,22 @@ int main(int argc, char **argv)
                 stats_grid[idx] = stats[idx];
                 idx++;
 
+                double progress = (double)idx / (double)total;
+                while (progress >= next_progress && next_progress < 1.001)
+                {
+                    int pct = (int)(next_progress * 100.0 + 0.5);
+                    printf("[STATS] scanning seeds: %d%% complete\n", pct);
+                    next_progress += 0.10;
+                }
+
                 if (abandoned_flag)
                     abandoned_count++;
                 if (hits > best_hits_so_far)
                     best_hits_so_far = hits;
             }
         }
+        if (next_progress <= 1.001)
+            printf("[STATS] scanning seeds: 100%% complete\n");
         double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
         printf("[STATS] scanned %d seed pairs in %.2fs | early-abandoned=%d (threshold=%.2f of best)\n",
                total, elapsed, abandoned_count, keepup_threshold);
