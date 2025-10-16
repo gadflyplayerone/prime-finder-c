@@ -254,8 +254,6 @@ static void mr_cache_init(void)
         return;
 
     ensure_cache_dir();
-    mr_cache_init();
-    mr_cache_init();
 
     FILE *fp = fopen(MR_CACHE_PATH, "r");
     if (fp)
