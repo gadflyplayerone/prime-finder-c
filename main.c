@@ -675,7 +675,7 @@ int main(int argc, char **argv)
                 while (progress >= next_progress && next_progress < 1.001)
                 {
                     int pct = (int)(next_progress * 100.0 + 0.5);
-                    printf("[STATS] scanning seeds: %d%% complete\n", pct);
+                    printf("[STATS] target: %d | scanning seeds: %d%% complete\n", target_digits, pct);
                     next_progress += 0.10;
                 }
 

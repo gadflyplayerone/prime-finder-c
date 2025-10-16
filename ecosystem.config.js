@@ -7,7 +7,7 @@ module.exports = {
       env: {
         OMP_NUM_THREADS: "8",
       },
-      args: "--target-digits 10000",
+      args: "--target-digits 1000",
       out_file: "./logs/prime-finder-omp8.log",
       error_file: "./logs/prime-finder-omp8.error.log",
       merge_logs: true,
@@ -21,7 +21,7 @@ module.exports = {
       env: {
         OMP_NUM_THREADS: "16",
       },
-      args: "--target-digits 10000",
+      args: "--target-digits 1000",
       out_file: "./logs/prime-finder-omp16.log",
       error_file: "./logs/prime-finder-omp16.error.log",
       merge_logs: true,
@@ -49,7 +49,7 @@ module.exports = {
       env: {
         OMP_NUM_THREADS: "64",
       },
-      args: "--target-digits 10000",
+      args: "--target-digits 100000",
       out_file: "./logs/prime-finder-omp64.log",
       error_file: "./logs/prime-finder-omp64.error.log",
       merge_logs: true,
