@@ -1,0 +1,4 @@
+export OMP_NUM_THREADS=1
+export PAR_CHUNK_SIZE=1
+export MR_REPS_CAND=8
+export MR_REPS_FINAL=25

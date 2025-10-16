@@ -3,7 +3,7 @@ UNAME_S := $(shell uname -s)
 CC ?= gcc
 CC_NOOMP ?= cc
 
-SRC = main.c flo_predict.c
+SRC = main.c
 LIBS = -lgmp -lm
 OMPFLAGS ?= -fopenmp
 
