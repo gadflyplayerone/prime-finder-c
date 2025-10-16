@@ -111,7 +111,7 @@ Different seeds `(s1, s2)` lock the sequence into different “tracks” modulo 
   - “MR(high)” (e.g., 42 rounds) to certify probable primality.
 
 ### Optional — **FLO_Predict Heuristic**
-- Enable with `--flo_predict 1`.
+- Enable with `--flo-predict 1`.
 - Uses empirical residue/position scoring to prioritize “hot” indices.
 - Think of it as a lightweight, online Bayesian re-ranking of indices.
 
@@ -124,7 +124,7 @@ Different seeds `(s1, s2)` lock the sequence into different “tracks” modulo 
 # Example: scan + hunt for a ~1000-digit prime using 8 threads
 export OMP_NUM_THREADS=8
 
-./prime_finder   --x-min 300 --x-max 500   --y-min 300 --y-max 500   --seq-len 500   --mr-cert-low 4 --mr-cert-high 42   --target-digits 1000   --make-fig 0   --flo_predict 0
+./prime_finder  --target-digits 1000   --make-fig 0   --flo-predict 0
 ```
 
 **Key flags (common):**
@@ -132,7 +132,7 @@ export OMP_NUM_THREADS=8
 - `--seq-len` : Stage-1 terms generated per seed (e.g., `K = 300–1000`)
 - `--mr-cert-low / --mr-cert-high` : MR rounds for triage / certification
 - `--target-digits` : minimum digits for Stage-2 focus gate
-- `--flo_predict {0|1}` : enable/disable predictive re-ranking
+- `--flo-predict {0|1}` : enable/disable predictive re-ranking
 - `--output` : override results file (optional)
 - `--eff-avg-val` : internal tuning for early-abandon heuristics (optional)
 
@@ -217,7 +217,7 @@ This normalizes by the **digits of the found prime** (not the target), which is 
 | `--mr-cert-low` | Fast pre-screen. Low rounds reduce false positives without wasting time. | 4 |
 | `--mr-cert-high` | Final certification. Large enough to satisfy your confidence bar. | 32–64 (42 used in logs) |
 | `--target-digits` | Entry gate for Stage-2 focus. | 500–5000 |
-| `--flo_predict` | Re-ranks indices based on observed hot spots; helps when variance is high. | 0/1 (experiment) |
+| `--flo-predict` | Re-ranks indices based on observed hot spots; helps when variance is high. | 0/1 (experiment) |
 
 ---
 
@@ -226,7 +226,7 @@ This normalizes by the **digits of the found prime** (not the target), which is 
 ```bash
 # Example parameterization aligned with your logs
 export OMP_NUM_THREADS=8
-./prime_finder   --x-min 150 --x-max 1200   --y-min 100 --y-max 1200   --seq-len 300-1100   --mr-cert-low 4 --mr-cert-high 42   --target-digits 1000   --make-fig 0   --flo_predict 0
+./prime_finder  --target-digits 1000   --make-fig 0   --flo-predict 0
 ```
 
 > Expect Stage-1 scan time to scale with the seed box and `seq-len`. FLO’s **early-abort** prunes weak seeds cheaply.
@@ -236,7 +236,7 @@ export OMP_NUM_THREADS=8
 ## 11) File Map
 
 - `main.c` — FLO kernel (scan, select, advance, certify)  
-- `flo_predict.c/.h` — optional predictor (rank indices & residue tracks)  
+- `flo-predict.c/.h` — optional predictor (rank indices & residue tracks)  
 - `Makefile` — builds for (no-OMP / OMP-8/32/64) and Clang/GCC variants  
 - `docs/` — heatmaps & exports (PPM → PNG recommended)
 
@@ -274,7 +274,7 @@ export OMP_NUM_THREADS=8
 - **What**: FLO is a guided prime search over Fibonacci-like sequences.  
 - **Why**: Certain seed tracks dodge small factors → fewer MR checks to win.  
 - **How much better**: ~**72% fewer** checks on average at ~10³ digits (20 runs), with best cases >**96%** savings.  
-- **How to use**: install GMP, build with (GCC+OpenMP), run Stage-1 sweep → Stage-2 focus; optionally enable `--flo_predict`.  
+- **How to use**: install GMP, build with (GCC+OpenMP), run Stage-1 sweep → Stage-2 focus; optionally enable `--flo-predict`.  
 - **Who benefits**: anyone needing big probable primes quickly without deep number-theory lift.
 
 
@@ -413,7 +413,7 @@ PM2 exposes the process console output plus CPU and per-core utilization for eac
 
 ## 7. FLO_Predict Module
 
-The `--flo_predict` flag introduces **adaptive residue weighting** based on historical seed performance. Using a Bayesian ranker, FLO_Predict updates confidence scores after every confirmed composite or prime hit, gradually aligning computational focus toward **modularly advantageous indices**.
+The `--flo-predict` flag introduces **adaptive residue weighting** based on historical seed performance. Using a Bayesian ranker, FLO_Predict updates confidence scores after every confirmed composite or prime hit, gradually aligning computational focus toward **modularly advantageous indices**.
 
 ---
 

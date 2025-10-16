@@ -49,7 +49,7 @@ module.exports = {
       env: {
         OMP_NUM_THREADS: "64",
       },
-      args: "--target-digits 30000 --flo_predict 1",
+      args: "--target-digits 30000 --flo-predict 1",
       out_file: "./logs/prime-finder-omp64.log",
       error_file: "./logs/prime-finder-omp64.error.log",
       merge_logs: true,
@@ -60,7 +60,7 @@ module.exports = {
       name: "prime-finder-omp192",
       exec_interpreter: "bash",
       script: "./prime_finder_omp192",
-      args: "--target-digits 100000 flo_predict 1",
+      args: "--target-digits 100000 flo-predict 1",
       cwd: "/home/ubuntu/prime-finder-c",
       env: {
         OMP_NUM_THREADS: "192",
