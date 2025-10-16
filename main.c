@@ -1086,10 +1086,16 @@ int main(int argc, char **argv)
                             double expected_checks_found = expected_prime_trials(dcount, /*odd_only=*/1, /*corrections=*/0);
                             double eff_ratio_target = (checks > 0) ? (expected_checks_target / (double)checks) : 0.0;
                             double eff_ratio_found = (checks > 0) ? (expected_checks_found / (double)checks) : 0.0;
+                            double secs = wall_time_now() - search_phase_start;
+                            double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
                             printf("FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
                                    s1, s2, dcount, current_idx, checks);
                             fprintf(out, "FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
                                     s1, s2, dcount, current_idx, checks);
+                            printf("  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
+                                   secs, checks, expected_checks, eff_ratio);
+                            fprintf(out, "  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
+                                    secs, checks, expected_checks, eff_ratio);
                             printf("  expected_checks_target_digits(%d): %.1f | efficiency_target (expected/actual): %.3f\n",
                                    target_digits, expected_checks_target, eff_ratio_target);
                             fprintf(out, "  expected_checks_target_digits(%d): %.1f | efficiency_target (expected/actual): %.3f\n",
@@ -1098,6 +1104,7 @@ int main(int argc, char **argv)
                                    dcount, expected_checks_found, eff_ratio_found);
                             fprintf(out, "  expected_checks_actual_digits(%d): %.1f | efficiency_actual (expected/actual): %.3f\n",
                                     dcount, expected_checks_found, eff_ratio_found);
+                            printf("  prime: %s\n", prime_str);
                             fprintf(out, "prime: %s\n", prime_str);
                             free(prime_str);
                             total_found++;
