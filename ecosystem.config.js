@@ -1,56 +1,57 @@
 module.exports = {
   apps: [
     {
-      name: 'prime-finder-omp8',
-      script: './prime_finder_omp8',
+      name: "prime-finder-omp8",
+      script: "./prime_finder_omp8",
       cwd: __dirname,
       env: {
-        OMP_NUM_THREADS: '8'
+        OMP_NUM_THREADS: "8",
       },
-      out_file: './logs/prime-finder-omp8.log',
-      error_file: './logs/prime-finder-omp8.error.log',
+      out_file: "./logs/prime-finder-omp8.log",
+      error_file: "./logs/prime-finder-omp8.error.log",
       merge_logs: true,
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      autorestart: false
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      autorestart: false,
     },
     {
-      name: 'prime-finder-omp16',
-      script: './prime_finder_omp16',
+      name: "prime-finder-omp16",
+      script: "./prime_finder_omp16",
       cwd: __dirname,
       env: {
-        OMP_NUM_THREADS: '16'
+        OMP_NUM_THREADS: "16",
       },
-      out_file: './logs/prime-finder-omp16.log',
-      error_file: './logs/prime-finder-omp16.error.log',
+      out_file: "./logs/prime-finder-omp16.log",
+      error_file: "./logs/prime-finder-omp16.error.log",
       merge_logs: true,
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      autorestart: false
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      autorestart: false,
     },
     {
-      name: 'prime-finder-omp32',
-      script: './prime_finder_omp32',
+      name: "prime-finder-omp32",
+      script: "./prime_finder_omp32",
       cwd: __dirname,
       env: {
-        OMP_NUM_THREADS: '32'
+        OMP_NUM_THREADS: "32",
       },
-      out_file: './logs/prime-finder-omp32.log',
-      error_file: './logs/prime-finder-omp32.error.log',
+      out_file: "./logs/prime-finder-omp32.log",
+      error_file: "./logs/prime-finder-omp32.error.log",
       merge_logs: true,
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      autorestart: false
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      autorestart: false,
     },
     {
-      name: 'prime-finder-omp64',
-      script: './prime_finder_omp64',
+      name: "prime-finder-omp64",
+      script: "./prime_finder_omp64",
       cwd: __dirname,
       env: {
-        OMP_NUM_THREADS: '64'
+        OMP_NUM_THREADS: "64",
       },
-      out_file: './logs/prime-finder-omp64.log',
-      error_file: './logs/prime-finder-omp64.error.log',
+      args: "--seed-min 1500   --seed-max 1750   --window 1000   --top 10   --target-digits 250000   --max-terms 2000000",
+      out_file: "./logs/prime-finder-omp64.log",
+      error_file: "./logs/prime-finder-omp64.error.log",
       merge_logs: true,
-      log_date_format: 'YYYY-MM-DD HH:mm:ss',
-      autorestart: false
-    }
-  ]
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      autorestart: false,
+    },
+  ],
 };
