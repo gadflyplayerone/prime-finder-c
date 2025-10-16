@@ -62,6 +62,7 @@ module.exports = {
       cwd: __dirname,
       env: {
         OMP_NUM_THREADS: "192",
+        OMP_STACKSIZE: "256M",
       },
       args: "--target-digits 100000 --flo_predict 1",
       out_file: "./logs/prime-finder-omp64.log",
