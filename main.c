@@ -1200,17 +1200,6 @@ int main(int argc, char **argv)
             fflush(stdout);
         }
 
-        if (mpz_sizeinbase(b, 10) < (unsigned)target_digits)
-        {
-            printf("  Reached max warm-up terms without hitting %d digits. Skipping seed.\n", target_digits);
-            fprintf(out, "  Reached max warm-up terms without hitting %d digits. Skipping.\n", target_digits);
-            seed_search_elapsed = wall_time_now() - seed_search_start;
-            total_search_seconds += seed_search_elapsed;
-            printf("[TIMING] seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
-            fprintf(out, "# seed=(%d,%d) search_elapsed=%.3fs\n", s1, s2, seed_search_elapsed);
-            continue;
-        }
-
         log_term_reporting_enabled = 1;
         double search_phase_start = wall_time_now();
         long long checks = 0;
