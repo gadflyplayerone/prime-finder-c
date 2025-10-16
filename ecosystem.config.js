@@ -56,5 +56,20 @@ module.exports = {
       log_date_format: "YYYY-MM-DD HH:mm:ss",
       autorestart: false,
     },
+    ,
+    {
+      name: "prime-finder-omp192",
+      script: "./prime_finder_omp192",
+      cwd: __dirname,
+      env: {
+        OMP_NUM_THREADS: "192",
+      },
+      args: "--target-digits 100000 --flo_predict 1",
+      out_file: "./logs/prime-finder-omp64.log",
+      error_file: "./logs/prime-finder-omp64.error.log",
+      merge_logs: true,
+      log_date_format: "YYYY-MM-DD HH:mm:ss",
+      autorestart: false,
+    },
   ],
 };
