@@ -368,8 +368,12 @@ make prime_finder_omp64        # 64-core build
 ### 6.3 Run Example
 
 ```bash
-./prime_finder --seed-min 1 --seed-max 250 --window 100                --top 25 --target-digits 1000 --max-terms 50000
+./prime_finder --target-digits 1000
 ```
+
+At startup the program now auto-selects a seed range: it draws `seed_min` uniformly from `[1000, 100000]`, sets `seed_max = seed_min + 200`, and runs with a fixed `window = 1000`. The chosen range is echoed as `[RANDOM] seed_min=… seed_max=… window=1000` in the console/PM2 logs for visibility.
+
+Seed scan results are cached in `cache/seed_cache_<min>_<max>_w1000.csv`; subsequent runs that pick the same range reuse this data immediately. The leaderboard always reports the top 10 seeds, and Stage 2 now runs without a max-terms cap. During Stage 2 the live ETA printed to stderr is scaled by the active OpenMP thread count (e.g., `/8`, `/16`, etc.), reflecting the parallel chunk testing speedup.
 
 ### 6.4 Output Files
 

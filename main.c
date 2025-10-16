@@ -24,15 +24,24 @@
 #include "flo_predict.h"
 #include <time.h>
 #include <math.h>
+#include <stdint.h>
+#include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
-static long current_pid(void) { return (long)GetCurrentProcessId(); }
+#include <direct.h>
 #else
 #include <unistd.h>
-static long current_pid(void) { return (long)getpid(); }
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+#ifdef _WIN32
+static long current_pid(void) { return (long)GetCurrentProcessId(); }
+#else
+static long current_pid(void) { return (long)getpid(); }
 #endif
 
 /* ---------- Expected-trials estimator (unchanged API) ---------- */
@@ -86,6 +95,80 @@ typedef struct
     int hits;
     double density;
 } SeedStat;
+
+static void ensure_cache_dir(void)
+{
+    errno = 0;
+#ifdef _WIN32
+    if (_mkdir("cache") != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "[CACHE] Failed to create cache/ directory: %s\n", strerror(errno));
+    }
+#else
+    if (mkdir("cache", 0755) != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "[CACHE] Failed to create cache/ directory: %s\n", strerror(errno));
+    }
+#endif
+}
+
+static int load_seed_cache(const char *path, int seed_min, int seed_max, int window, int total, SeedStat *stats, SeedStat *stats_grid)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return 0;
+
+    int file_seed_min = 0, file_seed_max = 0, file_window = 0, file_total = 0;
+    if (fscanf(fp, "seed_min=%d seed_max=%d window=%d total=%d\n", &file_seed_min, &file_seed_max, &file_window, &file_total) != 4)
+    {
+        fclose(fp);
+        return 0;
+    }
+    if (file_seed_min != seed_min || file_seed_max != seed_max || file_window != window || file_total != total)
+    {
+        fclose(fp);
+        return 0;
+    }
+
+    for (int i = 0; i < total; ++i)
+    {
+        int s1 = 0, s2 = 0, hits = 0;
+        double density = 0.0;
+        if (fscanf(fp, "%d,%d,%d,%lf\n", &s1, &s2, &hits, &density) != 4)
+        {
+            fclose(fp);
+            return 0;
+        }
+        stats[i].s1 = stats_grid[i].s1 = s1;
+        stats[i].s2 = stats_grid[i].s2 = s2;
+        stats[i].hits = stats_grid[i].hits = hits;
+        stats[i].density = stats_grid[i].density = density;
+    }
+
+    fclose(fp);
+    return 1;
+}
+
+static void write_seed_cache(const char *path, int seed_min, int seed_max, int window, int total, const SeedStat *stats_grid)
+{
+    FILE *fp = fopen(path, "w");
+    if (!fp)
+    {
+        fprintf(stderr, "[CACHE] Failed to write %s: %s\n", path, strerror(errno));
+        return;
+    }
+
+    fprintf(fp, "seed_min=%d seed_max=%d window=%d total=%d\n", seed_min, seed_max, window, total);
+    for (int i = 0; i < total; ++i)
+    {
+        fprintf(fp, "%d,%d,%d,%.10f\n",
+                stats_grid[i].s1,
+                stats_grid[i].s2,
+                stats_grid[i].hits,
+                stats_grid[i].density);
+    }
+    fclose(fp);
+}
 
 static void flo_next(mpz_t a, mpz_t b)
 {
@@ -431,7 +514,7 @@ typedef struct
 static int build_candidate_chunk(Candidate *cand, mpz_t a, mpz_t b, int *t, int max_terms)
 {
     int m = 0;
-    while (m < PAR_CHUNK_SIZE && *t < max_terms)
+    while (m < PAR_CHUNK_SIZE && (max_terms < 0 || *t < max_terms))
     {
         /* current term is in b; quick exclusions */
         if (!(mpz_divisible_ui_p(b, 2) || mpz_divisible_ui_p(b, 5)))
@@ -503,24 +586,16 @@ int main(int argc, char **argv)
     configure_streams_for_pm2(argc, argv);
 
     /* CLI-compatible defaults (unchanged) */
-    int seed_min = 1, seed_max = 50, window = 100, top = 25, max_terms = 200000, target_digits = 3800;
+    int seed_min = 0, seed_max = 0;
+    const int window = 1000;
+    int top = 10, max_terms = -1, target_digits = 3800;
     const char *out_path = "results.txt";
     const char *batch_path = "batch-results.txt";
     int flo_predict_flag = 0;
 
     for (int i = 1; i < argc; i++)
     {
-        if (!strcmp(argv[i], "--seed-min") && i + 1 < argc)
-            seed_min = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--seed-max") && i + 1 < argc)
-            seed_max = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--window") && i + 1 < argc)
-            window = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--top") && i + 1 < argc)
-            top = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--max-terms") && i + 1 < argc)
-            max_terms = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--target-digits") && i + 1 < argc)
+        if (!strcmp(argv[i], "--target-digits") && i + 1 < argc)
             target_digits = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--out") && i + 1 < argc)
             out_path = argv[++i];
@@ -530,8 +605,16 @@ int main(int argc, char **argv)
             flo_predict_flag = (i+1<argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 1;
     }
 
-#ifdef _OPENMP
+    unsigned int entropy = (unsigned int)time(NULL);
+    entropy ^= (unsigned int)current_pid();
+    entropy ^= (unsigned int)(uintptr_t)&entropy;
+    srand(entropy);
+    const int seed_span = 100000 - 1000 + 1;
+    seed_min = 1000 + (rand() % seed_span);
+    seed_max = seed_min + 200;
+
     int omp_threads = 1;
+#ifdef _OPENMP
 #pragma omp parallel
     {
 #pragma omp master
@@ -540,45 +623,67 @@ int main(int argc, char **argv)
     fprintf(stderr, "[OMP] Using up to %d threads for heatmap/diagnostics and parallel prime checks\n", omp_threads);
 #endif
 
-    printf("== FLO Prime Finder (C + GMP) ==\n");
-    printf("seed_min=%d seed_max=%d window=%d top=%d target_digits=%d max_terms=%d\n",
-           seed_min, seed_max, window, top, target_digits, max_terms);
+    printf("[RANDOM] seed_min=%d seed_max=%d (span=%d) window=%d\n",
+           seed_min, seed_max, seed_max - seed_min + 1, window);
 
-    /* Stage 1: Seed scan with early-abandon diagnostics */
+    char max_terms_label[32];
+    if (max_terms < 0)
+        strcpy(max_terms_label, "unbounded");
+    else
+        snprintf(max_terms_label, sizeof(max_terms_label), "%d", max_terms);
+
+    printf("== FLO Prime Finder (C + GMP) ==\n");
+    printf("seed_min=%d seed_max=%d window=%d top=%d target_digits=%d max_terms=%s\n",
+           seed_min, seed_max, window, top, target_digits, max_terms_label);
+
+    /* Stage 1: Seed scan with optional on-disk cache */
     int total = (seed_max - seed_min + 1) * (seed_max - seed_min + 1);
     SeedStat *stats = (SeedStat *)malloc(sizeof(SeedStat) * total);
     SeedStat *stats_grid = (SeedStat *)malloc(sizeof(SeedStat) * total); /* preserve pre-sort order for heatmap */
-    int idx = 0;
 
-    const double keepup_threshold = 0.80; /* abandon if cannot reach 80% of current best */
-    int best_hits_so_far = 0;
-    int abandoned_count = 0;
+    ensure_cache_dir();
+    char cache_path[256];
+    snprintf(cache_path, sizeof(cache_path), "cache/seed_cache_%d_%d_w%d.csv", seed_min, seed_max, window);
 
-    clock_t t0 = clock();
-    for (int s1 = seed_min; s1 <= seed_max; ++s1)
+    int cache_hit = load_seed_cache(cache_path, seed_min, seed_max, window, total, stats, stats_grid);
+    if (!cache_hit)
     {
-        for (int s2 = seed_min; s2 <= seed_max; ++s2)
+        const double keepup_threshold = 0.80; /* abandon if cannot reach 80% of current best */
+        int best_hits_so_far = 0;
+        int abandoned_count = 0;
+        int idx = 0;
+
+        clock_t t0 = clock();
+        for (int s1 = seed_min; s1 <= seed_max; ++s1)
         {
-            int abandoned_flag = 0;
-            int hits = count_primes_in_window_abandon(s1, s2, window, best_hits_so_far, keepup_threshold, &abandoned_flag);
+            for (int s2 = seed_min; s2 <= seed_max; ++s2)
+            {
+                int abandoned_flag = 0;
+                int hits = count_primes_in_window_abandon(s1, s2, window, best_hits_so_far, keepup_threshold, &abandoned_flag);
 
-            stats[idx].s1 = s1;
-            stats[idx].s2 = s2;
-            stats[idx].hits = hits;
-            stats[idx].density = (double)hits / (double)(window > 0 ? window : 1);
+                stats[idx].s1 = s1;
+                stats[idx].s2 = s2;
+                stats[idx].hits = hits;
+                stats[idx].density = (double)hits / (double)(window > 0 ? window : 1);
 
-            stats_grid[idx] = stats[idx];
-            idx++;
+                stats_grid[idx] = stats[idx];
+                idx++;
 
-            if (abandoned_flag)
-                abandoned_count++;
-            if (hits > best_hits_so_far)
-                best_hits_so_far = hits;
+                if (abandoned_flag)
+                    abandoned_count++;
+                if (hits > best_hits_so_far)
+                    best_hits_so_far = hits;
+            }
         }
+        double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
+        printf("[STATS] scanned %d seed pairs in %.2fs | early-abandoned=%d (threshold=%.2f of best)\n",
+               total, elapsed, abandoned_count, keepup_threshold);
+        write_seed_cache(cache_path, seed_min, seed_max, window, total, stats_grid);
     }
-    double elapsed = (double)(clock() - t0) / CLOCKS_PER_SEC;
-    printf("[STATS] scanned %d seed pairs in %.2fs | early-abandoned=%d (threshold=%.2f of best)\n",
-           total, elapsed, abandoned_count, keepup_threshold);
+    else
+    {
+        printf("[CACHE] Using cached seed stats from %s (total=%d)\n", cache_path, total);
+    }
 
     /* Heatmaps/diagnostics */
     write_heatmap_ppm(stats_grid, seed_min, seed_max, "heatmap.ppm");
@@ -640,7 +745,7 @@ int main(int argc, char **argv)
 
     /* Stage 2: Focused search with PARALLEL primality testing */
     FILE *out = fopen(out_path, "w");
-    fprintf(out, "# Focused FLO prime search\n# target_digits=%d max_terms=%d\n", target_digits, max_terms);
+    fprintf(out, "# Focused FLO prime search\n# target_digits=%d max_terms=%s\n", target_digits, max_terms_label);
 
     double expected_checks = expected_prime_trials(target_digits, /*odd_only=*/1, /*corrections=*/0);
     printf("Estimated primality tests per prime @ %d digits (odd-only): %.1f\n", target_digits, expected_checks);
@@ -669,7 +774,7 @@ int main(int argc, char **argv)
         {
             flo_next(a, b);
             terms_advanced++;
-            if (terms_advanced > max_terms)
+            if (max_terms >= 0 && terms_advanced > max_terms)
                 break; /* safety */
         }
 
@@ -712,10 +817,10 @@ int main(int argc, char **argv)
             int current_idx = 0; /* we don’t track absolute seed index; we’ll just advance further as needed */
 
             /* Probe through ranked indices by advancing sequentially */
-            for (size_t k=0; k<ranked_n && checks < max_terms; ++k) {
+            for (size_t k=0; k<ranked_n && (max_terms < 0 || checks < max_terms); ++k) {
                 int target_i = ranked[k];
                 /* Advance until hitting target_i digits boundary already satisfied; we’re post warm-up, so simply advance difference */
-                while (current_idx < target_i && checks < max_terms) {
+                while (current_idx < target_i && (max_terms < 0 || checks < max_terms)) {
                     /* generate next term */
                     flo_next(a,b);
                     current_idx++;
@@ -764,7 +869,7 @@ int main(int argc, char **argv)
         /* === end FLO_Predict block === */
 /* NEW: batched + parallel prime checking */
         int t = 0; /* term counter post-threshold */
-        while (t < max_terms)
+        while (max_terms < 0 || t < max_terms)
         {
             Candidate cand[PAR_CHUNK_SIZE];
             int m = build_candidate_chunk(cand, a, b, &t, max_terms);
@@ -787,14 +892,18 @@ int main(int argc, char **argv)
             double avg_chk = (checks > 0) ? (elapsed_secs / (double)checks) : (m > 0 ? chunk_secs / (double)m : 0.0);
             double remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
             double eta_sec = remain * avg_chk;
+            double eta_parallel = eta_sec;
+            if (omp_threads > 1)
+                eta_parallel = eta_sec / (double)omp_threads;
 
             fprintf(stderr,
-                    "\rcheck #%lld | last≈%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs   ",
+                    "\rcheck #%lld | last≈%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs (@%d thr)   ",
                     checks,
                     (m > 0 ? (chunk_secs / (double)m) : 0.0),
                     avg_chk,
                     remain,
-                    eta_sec);
+                    eta_parallel,
+                    omp_threads);
 
             if (found_idx >= 0)
             {
@@ -836,7 +945,7 @@ int main(int argc, char **argv)
             clear_candidate_chunk(cand, m);
         }
 
-        if (!found_for_seed)
+        if (!found_for_seed && max_terms >= 0)
         {
             printf("  No prime found within %d checks-window (post-threshold) for this seed.\n", max_terms);
             fprintf(out, "  No prime found within %d checks-window (post-threshold).\n", max_terms);
