@@ -40,6 +40,8 @@
 #include <omp.h>
 #endif
 
+static const double LOG10_PHI = 0.20898764024997873;
+
 #ifdef _WIN32
 static long current_pid(void) { return (long)GetCurrentProcessId(); }
 #else
@@ -376,6 +378,101 @@ static void flo_next(mpz_t a, mpz_t b)
     /* (a,b) -> (b, a+b) without per-step init/clear churn */
     mpz_add(a, a, b); /* a = a_old + b_old */
     mpz_swap(a, b);   /* (a, b) = (b_old, a_old + b_old) */
+}
+
+/* Fast doubling Fibonacci helper: computes (F_n, F_{n+1}) */
+static void fib_fast_doubling(long long n, mpz_t Fn, mpz_t Fn1)
+{
+    if (n == 0)
+    {
+        mpz_set_ui(Fn, 0);
+        mpz_set_ui(Fn1, 1);
+        return;
+    }
+
+    mpz_t fk, fk1;
+    mpz_init(fk);
+    mpz_init(fk1);
+    fib_fast_doubling(n >> 1, fk, fk1);
+
+    mpz_t c, d, tmp;
+    mpz_init(c);
+    mpz_init(d);
+    mpz_init(tmp);
+
+    /* c = F_k * (2*F_{k+1} - F_k) */
+    mpz_mul_ui(tmp, fk1, 2);
+    mpz_sub(tmp, tmp, fk);
+    mpz_mul(c, fk, tmp);
+
+    /* d = F_k^2 + F_{k+1}^2 */
+    mpz_mul(d, fk, fk);
+    mpz_mul(tmp, fk1, fk1);
+    mpz_add(d, d, tmp);
+
+    if ((n & 1) == 0)
+    {
+        mpz_set(Fn, c);
+        mpz_set(Fn1, d);
+    }
+    else
+    {
+        mpz_set(Fn, d);
+        mpz_add(tmp, c, d);
+        mpz_set(Fn1, tmp);
+    }
+
+    mpz_clear(fk);
+    mpz_clear(fk1);
+    mpz_clear(c);
+    mpz_clear(d);
+    mpz_clear(tmp);
+}
+
+/* Advance (a,b) forward by 'steps' FLO transitions using matrix exponentiation. */
+static void flo_advance_steps(mpz_t a, mpz_t b, long long steps)
+{
+    if (steps <= 0)
+        return;
+
+    mpz_t Fn, Fn1, Fn_prev;
+    mpz_init(Fn);
+    mpz_init(Fn1);
+    mpz_init(Fn_prev);
+    fib_fast_doubling(steps, Fn, Fn1);
+    mpz_sub(Fn_prev, Fn1, Fn); /* F_{n-1} = F_{n+1} - F_n */
+
+    mpz_t new_a, new_b, tmp;
+    mpz_init(new_a);
+    mpz_init(new_b);
+    mpz_init(tmp);
+
+    /* new_a = a * F_{n-1} + b * F_n */
+    if (mpz_sgn(Fn_prev) == 0)
+    {
+        mpz_mul(new_a, b, Fn);
+    }
+    else
+    {
+        mpz_mul(new_a, a, Fn_prev);
+        mpz_mul(tmp, b, Fn);
+        mpz_add(new_a, new_a, tmp);
+    }
+
+    /* new_b = a * F_n + b * F_{n+1} */
+    mpz_mul(new_b, a, Fn);
+    mpz_mul(tmp, b, Fn1);
+    mpz_add(new_b, new_b, tmp);
+
+    mpz_set(a, new_a);
+    mpz_set(b, new_b);
+
+    mpz_clear(Fn);
+    mpz_clear(Fn1);
+    mpz_clear(Fn_prev);
+    mpz_clear(new_a);
+    mpz_clear(new_b);
+    mpz_clear(tmp);
 }
 
 /* count hits with early-abandon vs current best (threshold in [0,1]) */
@@ -1049,7 +1146,7 @@ int main(int argc, char **argv)
         mpz_set_ui(b, (unsigned long)s2);
 
         /* warm-up to target digits (no prime checks before threshold) */
-        int terms_advanced = 0;
+        long long terms_advanced = 0;
         size_t digits = mpz_sizeinbase(b, 10);
         int warmup_milestone = 1; /* report 10%,20%,...,90% */
         size_t next_milestone_digits = 0;
@@ -1057,22 +1154,40 @@ int main(int argc, char **argv)
             next_milestone_digits = (size_t)(((long long)target_digits * warmup_milestone + 9) / 10);
         while (digits < (unsigned)target_digits)
         {
-            flo_next(a, b);
-            terms_advanced++;
+            long long step = 1;
+            if (target_digits > 0)
+            {
+                double remaining_digits = (double)target_digits - (double)digits;
+                if (remaining_digits < 0.0)
+                    remaining_digits = 0.0;
+                long long est = (long long)ceil(remaining_digits / LOG10_PHI);
+                if (est < 1)
+                    est = 1;
+                step = est;
+            }
+
+            if (max_terms >= 0)
+            {
+                long long allowed = (long long)max_terms - terms_advanced;
+                if (allowed <= 0)
+                    break; /* safety */
+                if (step > allowed)
+                    step = allowed;
+            }
+
+            flo_advance_steps(a, b, step);
+            terms_advanced += step;
             digits = mpz_sizeinbase(b, 10);
 
-            if (target_digits > 0 && warmup_milestone <= 9 && digits >= next_milestone_digits)
+            while (target_digits > 0 && warmup_milestone <= 9 && digits >= next_milestone_digits)
             {
                 double pct = warmup_milestone * 10.0;
-                printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.0f%% of target)\n",
+                printf("[WARMUP] seed=(%d,%d) steps=%lld digits=%zu (%.0f%% of target)\n",
                        s1, s2, terms_advanced, digits, pct);
                 fflush(stdout);
                 warmup_milestone++;
                 next_milestone_digits = (size_t)(((long long)target_digits * warmup_milestone + 9) / 10);
             }
-
-            if (max_terms >= 0 && terms_advanced > max_terms)
-                break; /* safety */
         }
 
         if (target_digits > 0 && digits >= (unsigned)target_digits)
@@ -1080,7 +1195,7 @@ int main(int argc, char **argv)
             double pct = (100.0 * (double)digits) / (double)target_digits;
             if (pct < 100.0)
                 pct = 100.0;
-            printf("[WARMUP] seed=(%d,%d) steps=%d digits=%zu (%.1f%% of target)\n",
+            printf("[WARMUP] seed=(%d,%d) steps=%lld digits=%zu (%.1f%% of target)\n",
                    s1, s2, terms_advanced, digits, pct);
             fflush(stdout);
         }
@@ -1129,15 +1244,15 @@ int main(int argc, char **argv)
                 }
             }
 
-            int base_idx = terms_advanced;
-            int current_offset = 0;
-            int last_tested_offset = -1;
+            long long base_idx = terms_advanced + 1; /* current b corresponds to T_{terms_advanced+1} */
+            long long current_offset = 0;
+            long long last_tested_offset = -1;
 
             /* Probe through ranked indices by advancing sequentially */
             for (size_t k = 0; k < ranked_n && (max_terms < 0 || checks < max_terms); ++k)
             {
                 int target_i = ranked[k];
-                int target_offset = target_i - base_idx;
+                long long target_offset = (long long)target_i - base_idx;
                 if (target_offset < 0)
                     target_offset = 0; /* already past this index */
 
@@ -1145,7 +1260,7 @@ int main(int argc, char **argv)
                 {
                     flo_next(a, b);
                     current_offset++;
-                    log_term_progress((long long)(base_idx + current_offset), b);
+                    log_term_progress(base_idx + current_offset, b);
                     last_tested_offset = -1; /* new term, force test below */
                 }
 
@@ -1167,7 +1282,7 @@ int main(int argc, char **argv)
                             mr_cache_store(h1, h2, (unsigned char)(isp ? 1 : 0));
                         }
                         checks++;
-                        flo_bandit_update(&P, base_idx + current_offset, isp);
+                        flo_bandit_update(&P, (int)(base_idx + current_offset), isp);
                         last_tested_offset = current_offset;
                         if (isp)
                         {
@@ -1180,10 +1295,10 @@ int main(int argc, char **argv)
                             double secs = wall_time_now() - search_phase_start;
                             double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
                             double eff_pct = (expected_checks_found > 0) ? 100.0 - (checks / expected_checks_found) : 0.0;
-                            printf("FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
-                                   s1, s2, dcount, base_idx + current_offset, checks);
-                            fprintf(out, "FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
-                                    s1, s2, dcount, base_idx + current_offset, checks);
+                            printf("FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%lld checks=%lld\n",
+                                   s1, s2, dcount, (long long)(base_idx + current_offset), checks);
+                            fprintf(out, "FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%lld checks=%lld\n",
+                                    s1, s2, dcount, (long long)(base_idx + current_offset), checks);
                             printf("  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
                                    secs, checks, expected_checks, eff_ratio);
                             fprintf(out, "  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
