@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "flo_predict.h"
 #include <time.h>
 #include <math.h>
 #ifdef _OPENMP
@@ -483,6 +484,7 @@ int main(int argc, char **argv)
     int seed_min = 1, seed_max = 50, window = 100, top = 25, max_terms = 200000, target_digits = 3800;
     const char *out_path = "results.txt";
     const char *batch_path = "batch-results.txt";
+    int flo_predict_flag = 0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -502,6 +504,8 @@ int main(int argc, char **argv)
             out_path = argv[++i];
         else if (!strcmp(argv[i], "--batch") && i + 1 < argc)
             batch_path = argv[++i];
+        else if (!strcmp(argv[i], "--flo_predict"))
+            flo_predict_flag = (i+1<argc && argv[i+1][0] != '-') ? atoi(argv[++i]) : 1;
     }
 
 #ifdef _OPENMP
@@ -658,7 +662,85 @@ int main(int argc, char **argv)
         long long checks = 0;
         int found_for_seed = 0;
 
-        /* NEW: batched + parallel prime checking */
+        
+        /* === FLO_Predict guided index policy (optional) === */
+        if (flo_predict_flag) {
+            FloPredictor P;
+            flo_predictor_init(&P, target_digits, /*window_half_width*/ 300);
+            /* Rank indices near target */
+            const int start_idx = P.window_start;
+            const int end_idx   = P.window_end;
+            const int span = (end_idx - start_idx + 1);
+            int *ranked = (int*)malloc(sizeof(int)* (span > 0 ? span : 1));
+            size_t ranked_n = flo_rank_window(&P, start_idx, end_idx, ranked, (size_t)(span>0?span:0));
+            /* Ensure we only move forward: sort ranked ascending after score sort to avoid rewinds */
+            if (ranked_n > 1) {
+                /* simple insertion sort ascending */
+                for (size_t ii=1; ii<ranked_n; ++ii) {
+                    int key = ranked[ii];
+                    size_t jj = ii;
+                    while (jj>0 && ranked[jj-1] > key) { ranked[jj]=ranked[jj-1]; jj--; }
+                    ranked[jj]=key;
+                }
+            }
+
+            /* Current absolute index offset since warm-up: terms_advanced from earlier counts steps after seed (term1) */
+            long long checks = 0;
+            int found_for_seed = 0;
+            int current_idx = 0; /* we don’t track absolute seed index; we’ll just advance further as needed */
+
+            /* Probe through ranked indices by advancing sequentially */
+            for (size_t k=0; k<ranked_n && checks < max_terms; ++k) {
+                int target_i = ranked[k];
+                /* Advance until hitting target_i digits boundary already satisfied; we’re post warm-up, so simply advance difference */
+                while (current_idx < target_i && checks < max_terms) {
+                    /* generate next term */
+                    flo_next(a,b);
+                    current_idx++;
+                    /* apply quick filters and test primality now (no chunking) */
+                    if (!(mpz_divisible_ui_p(b,2) || mpz_divisible_ui_p(b,5))) {
+                        int isp = mpz_probab_prime_p(b, 25) > 0;
+                        checks++;
+                        flo_bandit_update(&P, current_idx, isp);
+                        if (isp) {
+                            double secs = (double)(clock()-t_start) / (double)CLOCKS_PER_SEC;
+                            char *prime_str = mpz_get_str(NULL,10,b);
+                            int dcount = (int)strlen(prime_str);
+                            double expected_checks_target = expected_prime_trials(target_digits, /*odd_only=*/1, /*corrections=*/0);
+                            double expected_checks_found = expected_prime_trials(dcount, /*odd_only=*/1, /*corrections=*/0);
+                            double eff_ratio_target = (checks > 0) ? (expected_checks_target / (double)checks) : 0.0;
+                            double eff_ratio_found = (checks > 0) ? (expected_checks_found / (double)checks) : 0.0;
+                            printf("FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
+                                   s1, s2, dcount, current_idx, checks);
+                            fprintf(out, "FOUND probable prime [FLO_Predict] | seed=(%d,%d) digits=%d idx=%d checks=%lld\n",
+                                    s1, s2, dcount, current_idx, checks);
+                            printf("  expected_checks_target_digits(%d): %.1f | efficiency_target (expected/actual): %.3f\n",
+                                   target_digits, expected_checks_target, eff_ratio_target);
+                            fprintf(out, "  expected_checks_target_digits(%d): %.1f | efficiency_target (expected/actual): %.3f\n",
+                                    target_digits, expected_checks_target, eff_ratio_target);
+                            printf("  expected_checks_actual_digits(%d): %.1f | efficiency_actual (expected/actual): %.3f\n",
+                                   dcount, expected_checks_found, eff_ratio_found);
+                            fprintf(out, "  expected_checks_actual_digits(%d): %.1f | efficiency_actual (expected/actual): %.3f\n",
+                                    dcount, expected_checks_found, eff_ratio_found);
+                            fprintf(out, "prime: %s\n", prime_str);
+                            free(prime_str);
+                            total_found++;
+                            found_for_seed = 1;
+                            break;
+                        }
+                    }
+                }
+                if (found_for_seed) break;
+            }
+            if (!found_for_seed) {
+                printf("  [FLO_Predict] No prime found in guided window for seed=(%d,%d)\n", s1, s2);
+                fprintf(out, "  [FLO_Predict] No prime found in guided window for seed=(%d,%d)\n", s1, s2);
+            }
+            flo_predictor_destroy(&P);
+            continue; /* move to next seed */
+        }
+        /* === end FLO_Predict block === */
+/* NEW: batched + parallel prime checking */
         int t = 0; /* term counter post-threshold */
         while (t < max_terms)
         {
@@ -703,15 +785,21 @@ int main(int argc, char **argv)
                 int dcount = (int)strlen(prime_str);
 
                 double eff_ratio = (checks > 0) ? (expected_checks / (double)checks) : 0.0;
+                double expected_checks_found = expected_prime_trials(dcount, /*odd_only=*/1, /*corrections=*/0);
+                double eff_ratio_found = (checks > 0) ? (expected_checks_found / (double)checks) : 0.0;
 
                 printf("FOUND probable prime | seed=(%d,%d) digits=%d\n", s1, s2, dcount);
                 printf("  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
                        secs, checks, expected_checks, eff_ratio);
+                printf("  expected_checks_actual_digits(%d): %.1f | efficiency_actual (expected/actual): %.3f\n",
+                       dcount, expected_checks_found, eff_ratio_found);
                 printf("  prime: %s\n", prime_str);
 
                 fprintf(out, "FOUND probable prime | seed=(%d,%d) digits=%d\n", s1, s2, dcount);
                 fprintf(out, "  time_to_find: %.3f sec | checks: %lld | expected_checks: %.1f | efficiency (expected/actual): %.3f\n",
                         secs, checks, expected_checks, eff_ratio);
+                fprintf(out, "  expected_checks_actual_digits(%d): %.1f | efficiency_actual (expected/actual): %.3f\n",
+                        dcount, expected_checks_found, eff_ratio_found);
                 fprintf(out, "  prime: %s\n", prime_str);
                 fflush(out);
 

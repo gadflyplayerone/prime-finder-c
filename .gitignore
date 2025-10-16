@@ -1,5 +1,9 @@
-prime_finder
+prime_finder*
 .DS_Store
 batch-results.txt
 heatmap.*
 results.txt
+heatmap_exclusions.ppm
+heatmap_gcd.ppm
+run*.log
+stage*.log
