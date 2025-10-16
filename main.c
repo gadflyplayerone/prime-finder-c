@@ -1146,8 +1146,6 @@ int main(int argc, char **argv)
             double remain = (expected_checks > (double)checks) ? (expected_checks - (double)checks) : 0.0;
             double eta_sec = remain * avg_chk;
             double eta_parallel = eta_sec;
-            if (omp_threads > 1)
-                eta_parallel = eta_sec / (double)omp_threads;
 
             fprintf(stderr,
                     "\rcheck #%lld | last≈%.6fs avg=%.6fs | est. remain≈%.1f checks | ETA≈%.1fs (@%d thr)   ",
