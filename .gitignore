@@ -5,6 +5,7 @@ heatmap.*
 results*.txt
 heatmap_exclusions.ppm
 heatmap_gcd.ppm
+batch-results.txt
 run*.log
 stage*.log
 logs/
