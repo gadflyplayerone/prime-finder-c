@@ -58,18 +58,14 @@ module.exports = {
     },
     {
       name: "prime-finder-omp192",
-      script: "./prime_finder_omp192",
-      cwd: __dirname,
+      exec_interpreter: "bash",
+      script: "-c",
+      args: "ulimit -s unlimited && ./prime_finder_omp192 --target-digits 100000",
+      cwd: "/home/ubuntu/prime-finder-c",
       env: {
         OMP_NUM_THREADS: "192",
-        OMP_STACKSIZE: "256M",
-      },
-      args: "--target-digits 100000 --flo_predict 1",
-      out_file: "./logs/prime-finder-omp64.log",
-      error_file: "./logs/prime-finder-omp64.error.log",
-      merge_logs: true,
-      log_date_format: "YYYY-MM-DD HH:mm:ss",
-      autorestart: false,
+        OMP_STACKSIZE: "256M"
+      }
     },
   ],
 };
