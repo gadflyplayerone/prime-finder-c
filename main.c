@@ -249,11 +249,6 @@ FINISH:
     return hits;
 }
 
-static int count_primes_in_window(int s1, int s2, int window)
-{
-    return count_primes_in_window_abandon(s1, s2, window, /*best_hits_so_far=*/0, /*threshold=*/0.0, /*abandoned_out=*/NULL);
-}
-
 static int cmp_seedstat(const void *A, const void *B)
 {
     const SeedStat *a = (const SeedStat *)A;
